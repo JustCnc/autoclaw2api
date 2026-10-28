@@ -395,8 +395,19 @@
           <button class="btn sm primary" id="btnOAuthStart" disabled>生成授权链接</button>
           <button class="btn sm" id="btnOAuthOpen" disabled>重新打开</button>
         </div>
-        <div style="height:12px"></div>
-        <div class="scroll" style="max-height:200px"><pre class="logs" id="preOAuth">—</pre></div>
+        <div style="height:14px"></div>
+        <label class="field">回调链接</label>
+        <div class="hint">浏览器登录后会跳到 <code>http://localhost:&lt;端口&gt;/auth/callback-zai?code=…&amp;state=…</code>。
+          如果页面没有自动完成（端口被 AutoClaw 占用、浏览器在别的机器上），把地址栏里的整条链接粘贴到这里。</div>
+        <div style="height:8px"></div>
+        <textarea id="txtCallback" rows="3" placeholder="http://localhost:18432/auth/callback-zai?code=…&amp;state=…"></textarea>
+        <div style="height:10px"></div>
+        <div class="toolbar">
+          <button class="btn sm primary" id="btnCallback">完成登录</button>
+          <span class="muted" id="lblCallback"></span>
+        </div>
+        <div style="height:14px"></div>
+        <div class="scroll" style="max-height:140px"><pre class="logs" id="preOAuth">—</pre></div>
       </div>
       <div id="panePhone" style="display:none">
         <label class="field">手机号</label>
@@ -836,6 +847,8 @@ $('btnAddAccount').addEventListener('click', async () => {
   $('prePhone').textContent = '—';
   oauthLink = '';
   $('btnOAuthOpen').disabled = true;
+  $('txtCallback').value = '';
+  $('lblCallback').textContent = '';
   openModal('modalLogin');
   try { await setupCaptcha(); } catch (error) {
     $('lblCaptcha').textContent = error.message;
@@ -860,7 +873,9 @@ $('btnOAuthStart').addEventListener('click', async () => {
       return;
     }
     oauthLink = result.url;
-    $('preOAuth').textContent = ['授权链接：' + result.url, '', '已在浏览器里打开；登录完成后本页会自动刷新账号池。'].join('\n');
+    $('preOAuth').textContent = ['授权链接：' + result.url, '',
+      '已在浏览器里打开。登录完成后浏览器会跳到 localhost 回调；',
+      '如果这一页没有自动收尾，把地址栏里的整条链接粘贴到下面的「回调链接」，再点「完成登录」。'].join('\n');
     $('btnOAuthOpen').disabled = false;
     window.open(result.url, '_blank');
     startPolling(result.state);
@@ -873,6 +888,32 @@ $('btnOAuthStart').addEventListener('click', async () => {
 });
 
 $('btnOAuthOpen').addEventListener('click', () => { if (oauthLink) window.open(oauthLink, '_blank'); });
+
+$('btnCallback').addEventListener('click', async () => {
+  const button = $('btnCallback');
+  const raw = $('txtCallback').value.trim();
+  if (!raw) { toast('先粘贴回调链接', 'err'); return; }
+  button.disabled = true;
+  $('lblCallback').textContent = '正在换取 token…';
+  try {
+    const result = await api('/login/callback', { method: 'POST', body: JSON.stringify({ url: raw }) });
+    if (!result.ok) {
+      $('lblCallback').textContent = result.message || '登录失败';
+      toast(result.message || '登录失败', 'err');
+      return;
+    }
+    $('lblCallback').textContent = result.message || '登录成功';
+    $('txtCallback').value = '';
+    toast(result.message || '登录成功', 'ok');
+    closeModal('modalLogin');
+    refreshAll();
+  } catch (error) {
+    $('lblCallback').textContent = error.message;
+    toast(error.message, 'err');
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $('btnSendCode').addEventListener('click', async () => {
   const phone = $('txtPhone').value.trim();

@@ -140,6 +140,12 @@ POST /userapi/overseasv1/zai-oauth-login { code, state, navigate_uri } -> tokens
    `http://localhost:<login_callback_port>/auth/callback-zai`；
 5. 插件用 code 换 token，账号自动进池，控制台轮询到成功后刷新。
 
+**回调没自动到达时**：把浏览器地址栏里的整条链接
+（`http://localhost:18432/auth/callback-zai?code=…&state=…`）粘贴到弹窗里的
+「回调链接」再点「完成登录」，插件会解析 code/state、按粘贴链接里的 host 还原
+`navigate_uri` 并换 token。端口被 AutoClaw 客户端占用、链接在另一台机器上打开、
+或者浏览器停在回调页没转发，都走这条路。
+
 Docker 部署时把回调端口映射出来（端口由 `login_callback_port` 指定，0 表示自动选择，
 日志里会打印实际端口）：
 

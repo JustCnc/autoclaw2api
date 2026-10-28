@@ -441,3 +441,74 @@ func TestManagementPathExactMatchWins(t *testing.T) {
 		t.Fatalf("phone send: %q", got)
 	}
 }
+
+func TestPastedCallbackCompletesLogin(t *testing.T) {
+	var sawExchange string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/userapi/overseasv1/zai-oauth-url":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"oauth_url":"https://chat.z.ai/api/oauth/authorize?client_id=x&state=aosi.abc"}}`))
+		case "/userapi/overseasv1/zai-oauth-login":
+			var payload map[string]string
+			_ = json.Unmarshal(body, &payload)
+			sawExchange = payload["code"] + "|" + payload["state"] + "|" + payload["navigate_uri"]
+			_, _ = w.Write([]byte(`{"code":0,"data":{"user_id":991,"access_token":"` + testJWT() + `","refresh_token":"refresh-2"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.AuthBaseURL = server.URL
+	store, err := newStateStore(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.state = store
+	plugin.mu.Unlock()
+	plugin.stopLoginCallback()
+	defer plugin.stopLoginCallback()
+
+	session, link, err := plugin.startOAuthLogin(context.Background(), loginProviderZai, "proof")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !strings.Contains(link, "state=aosi.abc") || session.UpstreamState != "aosi.abc" {
+		t.Fatalf("upstream state not tracked: %q %q", link, session.UpstreamState)
+	}
+
+	// A callback URL whose port differs from the one the plugin bound still works:
+	// the pasted URL decides navigate_uri.
+	pasted := `{"url":"http://localhost:18432/auth/callback-zai?code=code-10339&state=aosi.abc"}`
+	result, err := plugin.completeLoginCallback([]byte(pasted))
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	if result["ok"] != true || result["alias"] == "" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if sawExchange != "code-10339|aosi.abc|http://localhost:18432/auth/callback-zai" {
+		t.Fatalf("exchange payload: %q", sawExchange)
+	}
+	if polled := plugin.loginSession(session.State); polled == nil || polled.Auth == nil {
+		t.Fatalf("session not completed: %+v", polled)
+	}
+
+	// Bare query strings and google callbacks are accepted too.
+	provider, code, state, navigate, err := parseCallbackInput([]byte("code=code-1&state=aosi.abc"))
+	if err != nil || provider != loginProviderZai || code != "code-1" || state != "aosi.abc" || navigate != "" {
+		t.Fatalf("query parse: %q %q %q %q %v", provider, code, state, navigate, err)
+	}
+	provider, _, _, navigate, err = parseCallbackInput([]byte("localhost:19654/auth/callback-google?code=c&state=s"))
+	if err != nil || provider != loginProviderGoogle || navigate != "http://localhost:19654/auth/callback-google" {
+		t.Fatalf("google parse: %q %q %v", provider, navigate, err)
+	}
+	if _, _, _, _, err := parseCallbackInput([]byte("http://localhost:18432/auth/callback-zai")); err == nil {
+		t.Fatal("callback without code must fail")
+	}
+}

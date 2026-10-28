@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -36,13 +37,14 @@ const (
 var defaultLoginCallbackPorts = []int{18432, 19654, 19723, 53699, 18764, 18765, 18766}
 
 type loginSession struct {
-	State       string
-	Provider    string
-	NavigateURI string
-	Created     time.Time
-	Expires     time.Time
-	Auth        *credential
-	Err         string
+	State         string
+	Provider      string
+	NavigateURI   string
+	UpstreamState string
+	Created       time.Time
+	Expires       time.Time
+	Auth          *credential
+	Err           string
 }
 
 func (a *app) loginProvider(raw string) string {
@@ -208,16 +210,11 @@ func (a *app) loginCallbackURL(provider string) (string, error) {
 
 func (a *app) serveLoginCallback(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
-	provider := ""
-	switch path {
-	case "/auth/callback-zai":
-		provider = loginProviderZai
-	case "/auth/callback-google":
-		provider = loginProviderGoogle
-	default:
+	if path != "/auth/callback-zai" && path != "/auth/callback-google" {
 		http.NotFound(w, r)
 		return
 	}
+	a.log.info("login", "收到浏览器回调 "+path)
 	query := r.URL.Query()
 	code := strings.TrimSpace(query.Get("code"))
 	state := strings.TrimSpace(query.Get("state"))
@@ -225,23 +222,14 @@ func (a *app) serveLoginCallback(w http.ResponseWriter, r *http.Request) {
 		writeCallbackPage(w, http.StatusBadRequest, false, "授权没有完成", "回调里缺少 code 或 state，请回到控制台重新发起授权。")
 		return
 	}
-	session := a.pendingLoginForProvider(provider)
-	if session == nil {
-		writeCallbackPage(w, http.StatusBadRequest, false, "登录会话已失效", "这个回调对应的授权已过期或被使用过，请回到控制台重新发起。")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	account, err := a.exchangeOAuthCode(ctx, provider, code, state, session.NavigateURI)
+	payload, _ := json.Marshal(callbackInput{Code: code, State: state, URL: "http://localhost" + r.URL.RequestURI()})
+	result, err := a.completeLoginCallback(payload)
 	if err != nil {
-		a.finishLogin(session.State, nil, err)
 		writeCallbackPage(w, http.StatusBadRequest, false, "授权失败", err.Error())
 		return
 	}
-	registered := a.registerLoginAccount(account, "", "login")
-	a.finishLogin(session.State, registered, nil)
-	a.log.info("login", "授权回调完成："+registered.Alias)
-	writeCallbackPage(w, http.StatusOK, true, "登录成功", "账号「"+registered.Alias+"」已加入账号池，可以关闭这个页面了。")
+	alias, _ := result["alias"].(string)
+	writeCallbackPage(w, http.StatusOK, true, "登录成功", "账号「"+alias+"」已加入账号池，可以关闭这个页面了。")
 }
 
 func writeCallbackPage(w http.ResponseWriter, status int, ok bool, title, detail string) {
@@ -448,7 +436,37 @@ func (a *app) startOAuthLogin(ctx context.Context, provider, captcha string) (*l
 	if err != nil {
 		return nil, "", err
 	}
+	// The authorize link carries the state the gateway echoes back in the
+	// callback, which is how a pasted callback URL is matched to this session.
+	if parsed, errParse := url.Parse(authorizeURL); errParse == nil {
+		if upstream := strings.TrimSpace(parsed.Query().Get("state")); upstream != "" {
+			a.loginMu.Lock()
+			if stored, ok := a.logins[session.State]; ok {
+				stored.UpstreamState = upstream
+				session.UpstreamState = upstream
+			}
+			a.loginMu.Unlock()
+		}
+	}
 	return session, authorizeURL, nil
+}
+
+// loginSessionByUpstreamState finds the session whose authorize link carried the
+// state that came back in the callback.
+func (a *app) loginSessionByUpstreamState(state string) *loginSession {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return nil
+	}
+	a.loginMu.Lock()
+	defer a.loginMu.Unlock()
+	for _, session := range a.logins {
+		if session.UpstreamState == state {
+			cloned := *session
+			return &cloned
+		}
+	}
+	return nil
 }
 
 // registerLoginAccount normalises an account produced by any login path and
@@ -481,6 +499,99 @@ func (a *app) registerLoginAccount(account *credential, alias, source string) *c
 // startLogin answers CPA's auth.login.start. The gateway needs a captcha proof
 // that only a human can produce, so CPA's generic link flow cannot complete it;
 // the plugin console hosts the widget instead.
+// callbackInput accepts whatever the user can copy out of the browser address
+// bar: the full callback URL, just the query string, or the two fields.
+type callbackInput struct {
+	URL   string `json:"url"`
+	Code  string `json:"code"`
+	State string `json:"state"`
+}
+
+func parseCallbackInput(raw []byte) (provider, code, state, navigateURI string, err error) {
+	body := strings.TrimSpace(string(raw))
+	var input callbackInput
+	if strings.HasPrefix(body, "{") {
+		if errJSON := json.Unmarshal(raw, &input); errJSON != nil {
+			return "", "", "", "", fmt.Errorf("请求格式不对")
+		}
+		body = strings.TrimSpace(input.URL)
+		if body == "" {
+			code, state = strings.TrimSpace(input.Code), strings.TrimSpace(input.State)
+		}
+	}
+	if body != "" {
+		if strings.HasPrefix(body, "code=") || strings.HasPrefix(body, "?") {
+			// A bare query string: the user copied only the part after the '?'.
+			query, errQuery := url.ParseQuery(strings.TrimPrefix(body, "?"))
+			if errQuery != nil {
+				return "", "", "", "", fmt.Errorf("回调链接无法解析")
+			}
+			code, state = strings.TrimSpace(query.Get("code")), strings.TrimSpace(query.Get("state"))
+		} else {
+			if !strings.Contains(body, "://") {
+				body = "http://" + strings.TrimPrefix(body, "//")
+			}
+			parsed, errParse := url.Parse(body)
+			if errParse != nil {
+				return "", "", "", "", fmt.Errorf("回调链接无法解析")
+			}
+			query := parsed.Query()
+			code, state = strings.TrimSpace(query.Get("code")), strings.TrimSpace(query.Get("state"))
+			if parsed.Host != "" {
+				navigateURI = parsed.Scheme + "://" + parsed.Host + strings.TrimSuffix(parsed.Path, "/")
+			}
+			switch {
+			case strings.Contains(parsed.Path, "google"):
+				provider = loginProviderGoogle
+			case strings.Contains(parsed.Path, "zai"):
+				provider = loginProviderZai
+			}
+		}
+	}
+	if code == "" || state == "" {
+		return "", "", "", "", fmt.Errorf("回调链接里没有 code 或 state，请复制浏览器地址栏里的完整链接")
+	}
+	if provider == "" {
+		provider = loginProviderZai
+	}
+	return provider, code, state, navigateURI, nil
+}
+
+// completeLoginCallback finishes a login from a pasted callback URL. A browser on
+// the same machine usually reaches the plugin's loopback listener directly, but a
+// link opened elsewhere, or a callback port taken by the AutoClaw client itself,
+// never arrives there; pasting the URL is the reliable fallback.
+func (a *app) completeLoginCallback(raw []byte) (map[string]any, error) {
+	provider, code, state, navigateURI, err := parseCallbackInput(raw)
+	if err != nil {
+		return nil, err
+	}
+	session := a.loginSessionByUpstreamState(state)
+	if session == nil {
+		session = a.pendingLoginForProvider(provider)
+	}
+	if session == nil {
+		return nil, fmt.Errorf("没有匹配的授权会话，请先点「生成授权链接」")
+	}
+	if session.Auth != nil {
+		return map[string]any{"ok": true, "alias": session.Auth.Alias, "account_id": session.Auth.ID, "message": "该链接已经用过了"}, nil
+	}
+	if navigateURI == "" {
+		navigateURI = session.NavigateURI
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	account, err := a.exchangeOAuthCode(ctx, provider, code, state, navigateURI)
+	if err != nil {
+		a.finishLogin(session.State, nil, err)
+		return nil, err
+	}
+	registered := a.registerLoginAccount(account, "", "login")
+	a.finishLogin(session.State, registered, nil)
+	a.log.info("login", "粘贴回调完成授权："+registered.Alias)
+	return map[string]any{"ok": true, "alias": registered.Alias, "account_id": registered.ID, "message": "登录成功，账号已加入账号池"}, nil
+}
+
 func (a *app) startLogin(raw []byte) ([]byte, error) {
 	if _, err := decodeRequest[authLoginStartRequest](raw); err != nil {
 		return nil, err

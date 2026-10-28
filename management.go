@@ -58,6 +58,7 @@ var managementRoutes = []managementRoute{
 	{"GET", "/login/status"},
 	{"GET", "/login/captcha"},
 	{"POST", "/login/start"},
+	{"POST", "/login/callback"},
 	{"POST", "/login/poll"},
 	{"POST", "/login/phone/send"},
 	{"POST", "/login/phone/verify"},
@@ -199,6 +200,12 @@ func (a *app) handleManagement(req managementRequest) managementResponse {
 		}
 		a.log.info("login", fmt.Sprintf("已生成 %s 授权链接：%s", provider, url))
 		return jsonResponse(map[string]any{"ok": true, "url": url, "state": session.State, "provider": provider, "expires_at": session.Expires})
+	case method == "POST" && path == "/login/callback":
+		payload, err := a.completeLoginCallback(req.Body)
+		if err != nil {
+			return jsonResponse(map[string]any{"ok": false, "message": err.Error()})
+		}
+		return jsonResponse(payload)
 	case method == "POST" && path == "/login/poll":
 		var body struct {
 			State string `json:"state"`
