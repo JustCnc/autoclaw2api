@@ -57,6 +57,9 @@ var managementRoutes = []managementRoute{
 	{"GET", "/credits"},
 	{"GET", "/credits/ledgers"},
 	{"POST", "/credits/refresh"},
+	{"GET", "/tasks"},
+	{"POST", "/tasks/claim"},
+	{"POST", "/rewards/login"},
 	{"GET", "/config"},
 	{"POST", "/test"},
 	{"GET", "/login/status"},
@@ -201,6 +204,52 @@ func (a *app) handleManagement(req managementRequest) managementResponse {
 			}
 		}
 		return jsonResponse(a.ledgerPayload(req.Query.Get("account"), limit))
+	case method == "GET" && path == "/tasks":
+		return jsonResponse(a.tasksPayload(req.Query.Get("account")))
+	case method == "POST" && path == "/tasks/claim":
+		var body struct {
+			Account string `json:"account"`
+			TaskID  string `json:"task_id"`
+		}
+		_ = json.Unmarshal(req.Body, &body)
+		target := a.pickAccount(body.Account)
+		if target == nil {
+			return jsonResponse(map[string]any{"ok": false, "message": "账号池是空的"})
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		result := a.claimRewards(ctx, target, strings.TrimSpace(body.TaskID))
+		payload := map[string]any{
+			"ok":      result.Points > 0 || result.LoginPoints > 0,
+			"message": result.Message,
+			"result":  result,
+		}
+		if result.Points == 0 && result.LoginPoints == 0 && result.Error != "" {
+			payload["ok"] = false
+		}
+		return jsonResponse(payload)
+	case method == "POST" && path == "/rewards/login":
+		var body struct {
+			Account string `json:"account"`
+		}
+		_ = json.Unmarshal(req.Body, &body)
+		target := a.pickAccount(body.Account)
+		if target == nil {
+			return jsonResponse(map[string]any{"ok": false, "message": "账号池是空的"})
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		if err := a.triggerLoginActive(ctx, target); err != nil {
+			return jsonResponse(map[string]any{"ok": false, "message": err.Error()})
+		}
+		time.Sleep(1500 * time.Millisecond)
+		points, entries := a.todayCampaignPoints(ctx, target)
+		a.dropCreditsCache(target.ID)
+		message := "今天还没有登录奖励到账"
+		if points > 0 {
+			message = fmt.Sprintf("今日登录奖励已到账 +%d 积分", points)
+		}
+		return jsonResponse(map[string]any{"ok": true, "message": message, "points": points, "entries": entries})
 	case method == "GET" && path == "/config":
 		return jsonResponse(map[string]any{"config": a.sanitizedConfig()})
 	case method == "POST" && path == "/test":
@@ -318,7 +367,13 @@ type accountView struct {
 	ID            string `json:"id"`
 	Alias         string `json:"alias"`
 	UserID        string `json:"user_id,omitempty"`
+	Email         string `json:"email,omitempty"`
+	UserName      string `json:"user_name,omitempty"`
+	UserPhone     string `json:"user_phone,omitempty"`
 	DeviceID      string `json:"device_id,omitempty"`
+	DeviceName    string `json:"device_name,omitempty"`
+	DeviceOS      string `json:"device_os,omitempty"`
+	RewardDate    string `json:"reward_date,omitempty"`
 	Source        string `json:"source,omitempty"`
 	Priority      int    `json:"priority"`
 	Enterprise    bool   `json:"enterprise"`
@@ -354,7 +409,13 @@ func (a *app) accountViews() []accountView {
 			ID:            account.ID,
 			Alias:         account.Alias,
 			UserID:        account.UserID,
+			Email:         account.Email,
+			UserName:      account.UserName,
+			UserPhone:     account.UserPhone,
 			DeviceID:      account.DeviceID,
+			DeviceName:    account.DeviceName,
+			DeviceOS:      account.DeviceOS,
+			RewardDate:    account.RewardDate,
 			Source:        account.Source,
 			Priority:      account.Priority,
 			Enterprise:    account.Enterprise,

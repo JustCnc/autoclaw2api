@@ -41,6 +41,7 @@ type loginSession struct {
 	State         string
 	Provider      string
 	NavigateURI   string
+	Device        string
 	UpstreamState string
 	Created       time.Time
 	Expires       time.Time
@@ -62,6 +63,7 @@ func (a *app) newLoginSession(provider, navigateURI string) *loginSession {
 		State:       randomHex(32),
 		Provider:    provider,
 		NavigateURI: navigateURI,
+		Device:      newDeviceProfile().ID,
 		Created:     now,
 		Expires:     now.Add(time.Duration(cfg.LoginTimeoutSeconds) * time.Second),
 	}
@@ -334,6 +336,7 @@ type oauthLoginResponse struct {
 		UserID       flexText `json:"user_id"`
 		UserName     flexText `json:"user_name"`
 		UserPhone    flexText `json:"user_phone"`
+		Email        flexText `json:"email"`
 		AccessToken  flexText `json:"access_token"`
 		RefreshToken flexText `json:"refresh_token"`
 		EnterpriseID flexText `json:"enterprise_id"`
@@ -414,12 +417,11 @@ func (a *app) loginCaptchaConfig(ctx context.Context) (captchaConfig, error) {
 	return envelope.Data, nil
 }
 
-func (a *app) requestOAuthURL(ctx context.Context, provider, navigateURI, captcha string) (string, error) {
-	cfg := a.currentConfig()
+func (a *app) requestOAuthURL(ctx context.Context, provider, navigateURI, captcha, device string) (string, error) {
 	payload := map[string]any{
 		"navigate_uri": navigateURI,
 		"source_id":    "autoclaw",
-		"device_id":    a.deviceID(cfg),
+		"device_id":    firstNonEmpty(device, a.deviceID(a.currentConfig())),
 	}
 	if strings.TrimSpace(captcha) != "" {
 		payload["ali_captcha_verify_param"] = captcha
@@ -449,14 +451,13 @@ func (a *app) requestOAuthURL(ctx context.Context, provider, navigateURI, captch
 	return strings.TrimSpace(envelope.Data.OAuthURL), nil
 }
 
-func (a *app) exchangeOAuthCode(ctx context.Context, provider, code, state, navigateURI string) (*credential, error) {
-	cfg := a.currentConfig()
+func (a *app) exchangeOAuthCode(ctx context.Context, provider, code, state, navigateURI, device string) (*credential, error) {
 	raw, err := a.postIdentity(ctx, "/userapi/overseasv1/"+provider+"-oauth-login", map[string]any{
 		"code":         code,
 		"state":        state,
 		"navigate_uri": navigateURI,
 		"source_id":    "autoclaw",
-		"device_id":    a.deviceID(cfg),
+		"device_id":    firstNonEmpty(device, a.deviceID(a.currentConfig())),
 	})
 	if err != nil {
 		return nil, err
@@ -479,7 +480,11 @@ func (a *app) exchangeOAuthCode(ctx context.Context, provider, code, state, navi
 	account := &credential{
 		AccessToken:  access,
 		RefreshToken: refresh,
+		DeviceID:     strings.TrimSpace(device),
 		UserID:       string(envelope.Data.UserID),
+		Email:        strings.TrimSpace(string(envelope.Data.Email)),
+		UserName:     strings.TrimSpace(string(envelope.Data.UserName)),
+		UserPhone:    strings.TrimSpace(string(envelope.Data.UserPhone)),
 		Source:       "login",
 		Enterprise:   enterpriseFlag(string(envelope.Data.EnterpriseID)),
 		UpdatedAt:    time.Now().UnixMilli(),
@@ -496,7 +501,7 @@ func (a *app) startOAuthLogin(ctx context.Context, provider, captcha string) (*l
 		return nil, "", err
 	}
 	session := a.newLoginSession(provider, navigateURI)
-	authorizeURL, err := a.requestOAuthURL(ctx, provider, navigateURI, captcha)
+	authorizeURL, err := a.requestOAuthURL(ctx, provider, navigateURI, captcha, session.Device)
 	if err != nil {
 		return nil, "", err
 	}
@@ -537,9 +542,7 @@ func (a *app) loginSessionByUpstreamState(state string) *loginSession {
 // publishes it to the pool.
 func (a *app) registerLoginAccount(account *credential, alias, source string) *credential {
 	cfg := a.currentConfig()
-	if account.DeviceID == "" {
-		account.DeviceID = a.deviceID(cfg)
-	}
+	account.ensureDevice()
 	account.Source = firstNonEmpty(source, "login")
 	if account.Priority == 0 {
 		account.Priority = cfg.CredentialPriority
@@ -555,6 +558,9 @@ func (a *app) registerLoginAccount(account *credential, alias, source string) *c
 	a.upsertAccount(account)
 	published := a.poolAccount(account.ID)
 	a.publishAccount(published, true)
+	// The desktop calls user-info on startup; that call is what makes AutoClaw
+	// grant the login reward, so replay it for every fresh login.
+	go a.claimRewardsQuietly(published, true)
 	return published
 }
 
@@ -645,7 +651,7 @@ func (a *app) completeLoginCallback(raw []byte) (map[string]any, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	account, err := a.exchangeOAuthCode(ctx, provider, code, state, navigateURI)
+	account, err := a.exchangeOAuthCode(ctx, provider, code, state, navigateURI, session.Device)
 	if err != nil {
 		a.finishLogin(session.State, nil, err)
 		return nil, err

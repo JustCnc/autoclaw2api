@@ -398,12 +398,12 @@ func TestOAuthURLAndExchange(t *testing.T) {
 	plugin.state = store
 	plugin.mu.Unlock()
 
-	if _, err := plugin.requestOAuthURL(context.Background(), loginProviderZai, "http://localhost:18765/auth/callback-zai", ""); err == nil ||
+	if _, err := plugin.requestOAuthURL(context.Background(), loginProviderZai, "http://localhost:18765/auth/callback-zai", "", "device-1"); err == nil ||
 		!strings.Contains(err.Error(), "安全验证") {
 		t.Fatalf("missing captcha should map to a captcha hint, got %v", err)
 	}
 
-	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "code-1", "upstream-state", "http://localhost:18765/auth/callback-zai")
+	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "code-1", "upstream-state", "http://localhost:18765/auth/callback-zai", "device-1")
 	if err != nil {
 		t.Fatalf("exchange: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestOAuthURLAndExchange(t *testing.T) {
 		t.Fatalf("exchange payload: %q", sawExchange)
 	}
 
-	link, err := plugin.requestOAuthURL(context.Background(), loginProviderZai, "http://localhost:18765/auth/callback-zai", "captcha-proof")
+	link, err := plugin.requestOAuthURL(context.Background(), loginProviderZai, "http://localhost:18765/auth/callback-zai", "captcha-proof", "device-1")
 	if err != nil || !strings.HasPrefix(link, "https://chat.z.ai/oauth/authorize") {
 		t.Fatalf("authorize url: %q %v", link, err)
 	}
@@ -539,7 +539,7 @@ func TestExchangeRetriesNonJSONResponse(t *testing.T) {
 	plugin.mu.Unlock()
 	plugin.resetHTTPClient()
 
-	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai")
+	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai", "device-1")
 	if err != nil {
 		t.Fatalf("retry should recover a JSON answer, got %v", err)
 	}
@@ -560,7 +560,7 @@ func TestExchangeRetriesNonJSONResponse(t *testing.T) {
 	plugin.cfg = cfg
 	plugin.mu.Unlock()
 	plugin.resetHTTPClient()
-	if _, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai"); err == nil ||
+	if _, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai", "device-1"); err == nil ||
 		!strings.Contains(err.Error(), "text/html") || !strings.Contains(err.Error(), "blocked") {
 		t.Fatalf("error should expose the html body, got %v", err)
 	}
@@ -591,7 +591,7 @@ func TestExchangeAcceptsStringUserID(t *testing.T) {
 	plugin.mu.Unlock()
 	plugin.resetHTTPClient()
 
-	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai")
+	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai", "device-1")
 	if err != nil {
 		t.Fatalf("exchange: %v", err)
 	}

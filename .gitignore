@@ -12,3 +12,4 @@ plugin.log
 .DS_Store
 .pi/
 *.exe
+.tmp/

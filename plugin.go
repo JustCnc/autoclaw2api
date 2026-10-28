@@ -50,6 +50,9 @@ type app struct {
 	billQueue    chan billWatch
 	claimedBills map[string]bool
 
+	rewardMu    sync.Mutex
+	rewardLocks map[string]*sync.Mutex
+
 	loginMu     sync.Mutex
 	logins      map[string]*loginSession
 	loginCb     *http.Server
@@ -127,6 +130,7 @@ func (a *app) configure(raw []byte) error {
 	for _, account := range a.poolSnapshot() {
 		a.publishAccount(account, false)
 	}
+	a.ensureUniqueDevices()
 	a.ensureHostRecords()
 	a.ensureLoginCallback()
 	a.startBackground()
@@ -149,6 +153,7 @@ func (a *app) startBackground() {
 
 	go a.catalogLoop(ctx)
 	go a.maintenanceLoop(ctx)
+	go a.rewardLoop(done)
 	go func() {
 		<-ctx.Done()
 		close(done)
@@ -218,6 +223,55 @@ func (a *app) refreshStaleAccounts(ctx context.Context) {
 		}
 		cancel()
 	}
+}
+
+// accountDevice returns the device id this account talks to AutoClaw with. Each
+// account keeps its own so a pool never looks like one machine.
+func (a *app) accountDevice(cfg Config, account *credential) string {
+	if id := strings.TrimSpace(cfg.DeviceID); id != "" {
+		return id
+	}
+	if account != nil {
+		if id := strings.TrimSpace(account.DeviceID); id != "" {
+			return id
+		}
+	}
+	return a.deviceID(cfg)
+}
+
+// deviceProfile is the per-account machine identity: an id plus the labels the
+// console shows. AutoClaw only accepts the id upstream.
+type deviceProfile struct {
+	ID   string
+	Name string
+	OS   string
+}
+
+func newDeviceProfile() deviceProfile {
+	return deviceProfile{
+		ID:   newUUID(),
+		Name: "DESKTOP-" + strings.ToUpper(randomHex(3)),
+		OS:   "win",
+	}
+}
+
+// ensureDevice gives the account its own device identity once and keeps it.
+func (c *credential) ensureDevice() deviceProfile {
+	profile := deviceProfile{ID: c.DeviceID, Name: c.DeviceName, OS: c.DeviceOS}
+	if profile.ID == "" {
+		fresh := newDeviceProfile()
+		profile = fresh
+		c.DeviceID = fresh.ID
+	}
+	if profile.Name == "" {
+		profile.Name = "DESKTOP-" + strings.ToUpper(randomHex(3))
+		c.DeviceName = profile.Name
+	}
+	if profile.OS == "" {
+		profile.OS = "win"
+		c.DeviceOS = profile.OS
+	}
+	return profile
 }
 
 func (a *app) deviceID(cfg Config) string {

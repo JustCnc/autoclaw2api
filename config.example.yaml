@@ -59,6 +59,10 @@ plugins:
       request_log_limit: 300
       credits_cache_seconds: 60
 
+      # 登录奖励 / 每日积分：登录后补打 user-info（触发登录奖励），后台定时领取每日任务
+      daily_reward: true
+      reward_interval_minutes: 30
+
       # 授权登录页（Docker 需要映射同端口）
       # OAuth 授权回调端口：0 = 自动从 18432/19654/19723/53699/1876x 里挑空闲端口
       # Docker 里要把选中的端口映射出来，浏览器回调才能回到容器

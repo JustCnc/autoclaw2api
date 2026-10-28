@@ -23,7 +23,13 @@ type credential struct {
 	AccessToken   string `json:"access_token"`
 	RefreshToken  string `json:"refresh_token,omitempty"`
 	DeviceID      string `json:"device_id,omitempty"`
+	DeviceName    string `json:"device_name,omitempty"`
+	DeviceOS      string `json:"device_os,omitempty"`
 	UserID        string `json:"user_id,omitempty"`
+	Email         string `json:"email,omitempty"`
+	UserName      string `json:"user_name,omitempty"`
+	UserPhone     string `json:"user_phone,omitempty"`
+	RewardDate    string `json:"reward_date,omitempty"`
 	Alias         string `json:"alias,omitempty"`
 	ID            string `json:"id,omitempty"`
 	Source        string `json:"source,omitempty"`
@@ -82,6 +88,11 @@ type credentialInput struct {
 	RefreshTokC  string `json:"refreshToken"`
 	DeviceID     string `json:"device_id"`
 	DeviceIDC    string `json:"deviceId"`
+	DeviceName   string `json:"device_name"`
+	DeviceOS     string `json:"device_os"`
+	Email        string `json:"email"`
+	UserName     string `json:"user_name"`
+	UserPhone    string `json:"user_phone"`
 	UserID       string `json:"user_id"`
 	UserIDC      string `json:"userId"`
 	Enterprise   bool   `json:"enterprise"`
@@ -104,7 +115,12 @@ func decodeCredential(raw []byte) (*credential, error) {
 		AccessToken:  normalizeToken(firstNonEmpty(in.AccessToken, in.AccessTokenC, in.Token, in.AuthToken)),
 		RefreshToken: normalizeToken(firstNonEmpty(in.RefreshToken, in.RefreshTokC)),
 		DeviceID:     strings.TrimSpace(firstNonEmpty(in.DeviceID, in.DeviceIDC)),
+		DeviceName:   strings.TrimSpace(in.DeviceName),
+		DeviceOS:     strings.TrimSpace(in.DeviceOS),
 		UserID:       strings.TrimSpace(firstNonEmpty(in.UserID, in.UserIDC)),
+		Email:        strings.TrimSpace(in.Email),
+		UserName:     strings.TrimSpace(in.UserName),
+		UserPhone:    strings.TrimSpace(in.UserPhone),
 		Alias:        strings.TrimSpace(firstNonEmpty(in.Alias, in.Label)),
 		ID:           strings.TrimSpace(in.ID),
 		Source:       strings.TrimSpace(in.Source),
@@ -122,7 +138,12 @@ func (c *credential) normalize() {
 	c.AccessToken = normalizeToken(c.AccessToken)
 	c.RefreshToken = normalizeToken(c.RefreshToken)
 	c.DeviceID = strings.TrimSpace(c.DeviceID)
+	c.DeviceName = strings.TrimSpace(c.DeviceName)
+	c.DeviceOS = strings.TrimSpace(c.DeviceOS)
 	c.UserID = strings.TrimSpace(c.UserID)
+	c.Email = strings.TrimSpace(c.Email)
+	c.UserName = strings.TrimSpace(c.UserName)
+	c.UserPhone = strings.TrimSpace(c.UserPhone)
 	c.ID = strings.TrimSpace(c.ID)
 	c.Alias = strings.TrimSpace(c.Alias)
 	if claims, ok := jwtClaims(c.AccessToken); ok {
@@ -134,6 +155,11 @@ func (c *credential) normalize() {
 		}
 		if c.DeviceID == "" {
 			c.DeviceID = claims.DeviceID
+		}
+		if c.Email == "" && strings.Contains(claims.JTI, "@") {
+			// z.ai issues jti = the login email; the desktop shows it as the
+			// account identity, so the console can too.
+			c.Email = strings.TrimSpace(claims.JTI)
 		}
 	}
 }
@@ -198,6 +224,50 @@ func (a *app) loadPool() {
 	a.credMu.Unlock()
 	if len(file.Accounts) > 0 {
 		a.log.info("accounts", fmt.Sprintf("已载入 %d 个账号", len(file.Accounts)))
+	}
+}
+
+// ensureUniqueDevices gives every account its own device id. A pool where all
+// accounts share one id looks like a single machine to AutoClaw, which both
+// weakens the disguise and can block per-device rewards.
+func (a *app) ensureUniqueDevices() {
+	a.credMu.Lock()
+	seen := map[string]bool{}
+	changed := 0
+	for _, account := range a.accounts {
+		if account == nil {
+			continue
+		}
+		if id := strings.TrimSpace(account.DeviceID); id != "" && !seen[id] {
+			seen[id] = true
+			if account.DeviceName == "" || account.DeviceOS == "" {
+				profile := account.ensureDevice()
+				account.DeviceName = profile.Name
+				account.DeviceOS = profile.OS
+				changed++
+			}
+			continue
+		}
+		// A token that names its own device keeps it: the session may be bound
+		// to that id, and rewriting it would log the account out.
+		if claims, ok := jwtClaims(account.AccessToken); ok && claims.DeviceID != "" && claims.DeviceID == account.DeviceID {
+			seen[account.DeviceID] = true
+			continue
+		}
+		profile := newDeviceProfile()
+		account.DeviceID = profile.ID
+		account.DeviceName = profile.Name
+		account.DeviceOS = profile.OS
+		seen[profile.ID] = true
+		changed++
+	}
+	a.credMu.Unlock()
+	if changed > 0 {
+		a.savePool()
+		a.log.info("accounts", fmt.Sprintf("已为 %d 个账号分配独立设备标识", changed))
+		for _, account := range a.poolSnapshot() {
+			a.publishAccount(account, false)
+		}
 	}
 }
 
@@ -313,6 +383,15 @@ func (a *app) selectAccount(preferred string, excluded map[string]bool, now time
 	return nil
 }
 
+// accountGone reports whether the upstream said this account no longer exists.
+func accountGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "已注销") || strings.Contains(text, "账号不存在") || strings.Contains(text, "account deleted")
+}
+
 func (a *app) markAccountDead(id, reason string) {
 	a.credMu.Lock()
 	if account, ok := a.accounts[id]; ok {
@@ -362,7 +441,12 @@ type credentialFile struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	DeviceID     string `json:"device_id,omitempty"`
+	DeviceName   string `json:"device_name,omitempty"`
+	DeviceOS     string `json:"device_os,omitempty"`
 	UserID       string `json:"user_id,omitempty"`
+	Email        string `json:"email,omitempty"`
+	UserName     string `json:"user_name,omitempty"`
+	UserPhone    string `json:"user_phone,omitempty"`
 	Source       string `json:"source,omitempty"`
 	Enterprise   bool   `json:"enterprise,omitempty"`
 	ExpiresAt    int64  `json:"expires_at,omitempty"`
@@ -382,7 +466,12 @@ func (a *app) publishAccount(account *credential, force bool) {
 		AccessToken:  account.AccessToken,
 		RefreshToken: account.RefreshToken,
 		DeviceID:     account.DeviceID,
+		DeviceName:   account.DeviceName,
+		DeviceOS:     account.DeviceOS,
 		UserID:       account.UserID,
+		Email:        account.Email,
+		UserName:     account.UserName,
+		UserPhone:    account.UserPhone,
 		Source:       account.Source,
 		Enterprise:   account.Enterprise,
 		ExpiresAt:    account.ExpiresAt,
@@ -630,6 +719,11 @@ func (a *app) refreshAccount(ctx context.Context, account *credential) (*credent
 	}()
 	if err != nil {
 		a.log.warn("accounts", fmt.Sprintf("账号 %s 刷新失败：%s", account.Alias, err.Error()))
+		if accountGone(err) {
+			// AutoClaw answers 403 {"error":"账号已注销"} for deleted accounts; no
+			// amount of refreshing brings those back, so stop using them.
+			a.markAccountDead(account.ID, err.Error())
+		}
 		return nil, err
 	}
 	a.log.info("accounts", fmt.Sprintf("账号 %s 已刷新，有效期至 %s", next.Alias, next.expiresAtTime().Local().Format("2006-01-02 15:04:05")))

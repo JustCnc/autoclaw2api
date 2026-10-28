@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -222,5 +223,109 @@ func TestClaimBillRejectsWrongModelOrWindow(t *testing.T) {
 	points, ok := a.claimBill(item, []creditLedger{{ID: "ok", At: "2026-10-28T12:52:31.076+08:00", Model: "glm-5.3-flash", Amount: -7, TokensIn: 10, TokensOut: 5}})
 	if !ok || points != -7 {
 		t.Fatalf("matching row should be claimed: %d ok=%v", points, ok)
+	}
+}
+
+func TestRewardTaskParsingAndClaimability(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/autoclaw-proxy/proxy/autoclaw-task-list":
+			_, _ = w.Write([]byte(`{"data":[
+				{"task_id":"daily_signin","title":"每日签到","reward_points":400,"task_type":"daily","status":"incomplete","display":true,"client_triggered":true},
+				{"task_id":"invite_friends","title":"邀请好友","reward_points":200,"task_type":"count","status":"incomplete","display":true,"client_triggered":false},
+				{"task_id":"daily_inspiration_center","title":"进入灵感中心","reward_points":200,"task_type":"daily","status":"complete","display":false,"client_triggered":true}]}`))
+		case r.URL.Path == "/autoclaw-proxy/proxy/autoclaw-task-complete":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["task_id"] != "daily_signin" {
+				t.Fatalf("unexpected task %q", body["task_id"])
+			}
+			_, _ = w.Write([]byte(`{"data":{"success":true,"already_completed":false,"reward_points":400,"task_id":"daily_signin"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.AuthBaseURL = server.URL
+	store, err := newStateStore(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.state = store
+	plugin.accounts = map[string]*credential{}
+	plugin.mu.Unlock()
+	plugin.resetHTTPClient()
+
+	account := &credential{ID: "acc-reward", Alias: "reward", AccessToken: "tok", DeviceID: "dev-1"}
+	tasks, err := plugin.fetchTasks(context.Background(), account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("want 3 tasks, got %d", len(tasks))
+	}
+	if !tasks[2].Done {
+		t.Fatal("status=complete should map to done")
+	}
+	if !claimableTask(tasks[0]) {
+		t.Fatal("daily task with reward should be claimable")
+	}
+	if claimableTask(tasks[1]) {
+		t.Fatal("invite task must not be claimed automatically")
+	}
+	if claimableTask(tasks[2]) {
+		t.Fatal("completed task must not be claimed")
+	}
+
+	claim, err := plugin.completeTask(context.Background(), account, "daily_signin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claim.Claimed || claim.Points != 400 {
+		t.Fatalf("claim = %+v", claim)
+	}
+}
+
+func TestCampaignEntryMatchesLoginReward(t *testing.T) {
+	if !campaignEntry(creditLedger{EventType: "autoclaw_user_active"}) {
+		t.Fatal("event_type should match")
+	}
+	if !campaignEntry(creditLedger{EventType: "autoclaw_user_signup_day_3"}) {
+		t.Fatal("signup day event should match")
+	}
+	if campaignEntry(creditLedger{EventType: "autoclaw_user_signup"}) {
+		t.Fatal("only day-suffixed signup events match")
+	}
+	if campaignEntry(creditLedger{Description: "每日签到"}) {
+		t.Fatal("a sign-in row is not a login reward")
+	}
+	if !campaignEntry(creditLedger{Description: "AutoClaw Login Reward +4000 credits autoclaw_user_active_reward_202609"}) {
+		t.Fatal("activity id fallback should match")
+	}
+}
+
+func TestDeviceIdentityIsPerAccount(t *testing.T) {
+	plugin.mu.Lock()
+	plugin.accounts = map[string]*credential{
+		"a": {ID: "a", Alias: "a", AccessToken: "t", DeviceID: "shared"},
+		"b": {ID: "b", Alias: "b", AccessToken: "t", DeviceID: "shared"},
+	}
+	plugin.mu.Unlock()
+	plugin.ensureUniqueDevices()
+	accounts := plugin.poolSnapshot()
+	seen := map[string]bool{}
+	for _, account := range accounts {
+		if account.DeviceID == "" || seen[account.DeviceID] {
+			t.Fatalf("device ids must be unique and set: %+v", account.DeviceID)
+		}
+		seen[account.DeviceID] = true
+		if account.DeviceName == "" {
+			t.Fatal("device name should be filled in")
+		}
 	}
 }

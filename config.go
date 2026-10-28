@@ -60,6 +60,11 @@ type Config struct {
 	RequestLogLimit     int `yaml:"request_log_limit"`
 	CreditsCacheSeconds int `yaml:"credits_cache_seconds"`
 
+	// Daily rewards: replay the client's login call and claim the daily task
+	// board, which is where the login/daily credits come from.
+	DailyReward           bool `yaml:"daily_reward"`
+	RewardIntervalMinutes int  `yaml:"reward_interval_minutes"`
+
 	// Authorization login. The gateway hands the OAuth code back to a loopback
 	// URL, so the plugin binds one of the ports the desktop client uses.
 	LoginCallbackPort   int `yaml:"login_callback_port"`
@@ -111,6 +116,8 @@ func defaultConfig() Config {
 		MaxTokensDefault:      131072,
 		RequestLogLimit:       300,
 		CreditsCacheSeconds:   60,
+		DailyReward:           true,
+		RewardIntervalMinutes: 30,
 		LoginCallbackPort:     0,
 		LoginTimeoutSeconds:   600,
 	}
@@ -232,6 +239,12 @@ func (c *Config) normalize() error {
 	}
 	if c.CreditsCacheSeconds > 3600 {
 		c.CreditsCacheSeconds = 3600
+	}
+	if c.RewardIntervalMinutes <= 0 {
+		c.RewardIntervalMinutes = 30
+	}
+	if c.RewardIntervalMinutes > 720 {
+		c.RewardIntervalMinutes = 720
 	}
 	if c.RequestTimeoutSeconds <= 0 {
 		c.RequestTimeoutSeconds = 600
@@ -380,6 +393,8 @@ func pluginConfigFields() []configField {
 		{Name: "debug_dump", Type: "boolean", Default: false, Description: "日志记录出站头部与正文（排障用）"},
 		{Name: "request_log_limit", Type: "integer", Default: 300, Description: "控制台「请求」页保留多少条请求记录（0 表示用默认 300）"},
 		{Name: "credits_cache_seconds", Type: "integer", Default: 60, Description: "积分余额缓存时长，避免频繁查询上游"},
+		{Name: "daily_reward", Type: "boolean", Default: true, Description: "后台每天自动触发登录奖励并领取每日积分任务"},
+		{Name: "reward_interval_minutes", Type: "integer", Default: 30, Description: "后台检查积分的间隔（分钟）"},
 		{Name: "login_callback_port", Type: "integer", Default: 0, Description: "OAuth 回调端口（0 = 自动从 18432/19654/19723/53699 里挑空闲端口）"},
 		{Name: "login_timeout_seconds", Type: "integer", Default: 600, Description: "授权登录有效期"},
 	}

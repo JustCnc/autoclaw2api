@@ -11,7 +11,7 @@ import (
 // the exported C ABI, so the plugin carries no SDK dependency.
 const (
 	providerKey   = "autoclaw2api"
-	pluginVersion = "0.4.0"
+	pluginVersion = "0.5.0"
 	abiVersion    = 1
 	schemaVersion = 6
 )

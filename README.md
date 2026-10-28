@@ -17,6 +17,16 @@
 - 插件页面：CPA 里的「AutoClaw2API」控制台（账号池 / 模型 / 请求 / 积分 / 日志 / 配置 / 测试对话）
 - 积分余额：读 AutoClaw 资产接口 `/agent-assetmgr/api/v2/wallets`，按账号展示总积分与钱包拆分
   （奖励 / 每日 / 订阅 / 加油包 / 其他），带缓存，只读查询不消耗积分
+- 登录奖励 / 每日积分：AutoClaw 的积分不是「主动领取」而是挂在客户端动作上 ——
+  `POST /userapi/v1/user-info`（客户端启动那次「登录」）会触发登录奖励入账（如 +4000），
+  每日任务走 `GET /autoclaw-proxy/proxy/autoclaw-task-list` +
+  `POST /autoclaw-proxy/proxy/autoclaw-task-complete`。插件登录成功后会补打一次 user-info，
+  后台每 `reward_interval_minutes` 分钟给当天还没领的账号跑一遍：触发登录奖励 + 领取每日任务
+  （`daily_signin` 每日签到、`daily_inspiration_center` 灵感中心等，邀请类任务不代领）
+- 每账号独立设备：每个账号有自己的 `device_id` 与设备名，登录、刷新、user-info、任务接口都用它，
+  账号池看起来不是同一台机器；从别处导入的重复 device_id 会被自动换成新的
+- 账号身份：控制台账号列表显示登录邮箱（z.ai 把邮箱放在 access_token 的 `jti` 里）、
+  设备名与设备码
 - 请求日志：每次转发的耗时、首字延迟、token、缓存命中、状态码、错误，环形缓冲；
   调用结束后回查 `/agent-assetmgr/api/v1/ledgers_std`，按模型 + token 数 + 时间窗匹配账单，
   把这一条实际消耗的积分回填到对应行
@@ -189,12 +199,12 @@ checksums.txt                             → sha256 校验
 页面只有一个 HTML + 原生 JS，不需要额外静态资源，也不占端口。包含：
 
 - **概览**：账号池可用数、模型数量、本地限速、运行时长、积分余额、上游指纹摘要、最近日志
-- **账号**：列表（固定高度滚动）、刷新 token、重置冷却、禁用/启用、移除、导入、导出
+- **账号**：列表（固定高度滚动，含登录邮箱、设备名/设备码）、刷新 token、重置冷却、禁用/启用、移除、导入、导出
 - **模型**：目录列表（固定高度滚动）、上下文/最大输出、是否对外暴露、手动刷新目录
 - **请求**：最近转发记录（固定高度滚动）+ 概况（总数/成功/失败/平均首字/平均耗时/token/缓存/积分），
   可自动刷新，积分由上游账单回填
-- **积分**：每个账号的余额卡片（总积分 + 钱包拆分）与积分流水表（时间/模型/扣费/输入输出/说明），
-  可手动刷新余额
+- **积分**：每个账号的余额卡片（总积分 + 钱包拆分）、每日积分/登录奖励卡片（任务列表 + 今日登录奖励，
+  可「领取每日积分」「触发登录奖励」）、积分流水表（时间/模型/扣费/输入输出/说明）
 - **日志**：环形缓冲（固定高度滚动），可关自动刷新
 - **设置**：只读生效配置，token 类字段打码
 
@@ -212,6 +222,9 @@ checksums.txt                             → sha256 校验
 | GET | `/credits[?refresh=1]` | 每个账号的积分余额 |
 | POST | `/credits/refresh` | 强制刷新全部余额 |
 | GET | `/credits/ledgers?account=&limit=` | 积分流水 |
+| GET | `/tasks?account=` | 每日任务列表 + 今日登录奖励 |
+| POST | `/tasks/claim` | 领取每日任务（`{account, task_id}`，task_id 留空=全部） |
+| POST | `/rewards/login` | 触发一次登录奖励（user-info） |
 | GET | `/logs?limit=300` | 插件日志 |
 | GET | `/config` | 只读生效配置 |
 | POST | `/catalog/refresh` / `/accounts/refresh` / `/accounts/reset` | 目录 / token / 冷却 |

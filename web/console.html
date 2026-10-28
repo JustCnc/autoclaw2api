@@ -277,10 +277,10 @@
         <table>
           <thead>
             <tr>
-              <th>账号</th><th>来源</th><th>优先级</th><th>Token</th><th>状态</th><th>操作</th>
+              <th>账号</th><th>登录邮箱</th><th>设备</th><th>来源</th><th>优先级</th><th>Token</th><th>状态</th><th>操作</th>
             </tr>
           </thead>
-          <tbody id="accountRows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+          <tbody id="accountRows"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -365,6 +365,30 @@
       </div>
       <div class="card-body">
         <div class="credit-grid" id="creditCards"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head">
+        <div>
+          <div class="card-title">每日积分 / 登录奖励</div>
+          <div class="card-desc" id="taskMeta">AutoClaw 的积分分两处：打开客户端时的登录奖励，和每日任务</div>
+        </div>
+        <div class="toolbar">
+          <select id="selTaskAccount" style="width:auto;min-width:140px"></select>
+          <button class="btn sm primary" id="btnClaimDaily">领取每日积分</button>
+          <button class="btn sm" id="btnLoginReward">触发登录奖励</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="chips" id="taskSummary"><span class="chip">加载中…</span></div>
+      </div>
+      <div class="scroll table" style="max-height:260px;border-top:1px solid var(--line)">
+        <table>
+          <thead>
+            <tr><th>任务</th><th>奖励</th><th>类型</th><th>状态</th><th>说明</th><th>操作</th></tr>
+          </thead>
+          <tbody id="taskRows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+        </table>
       </div>
     </div>
     <div class="card">
@@ -595,6 +619,10 @@ function showView(name) {
   if (name === 'requests') loadRequests().catch((e) => toast(e.message, 'err'));
   if (name === 'credits') {
     loadCredits(false).catch((e) => toast(e.message, 'err'));
+    loadAccounts()
+      .catch(function () {})
+      .then(() => loadTasks($('selTaskAccount').value))
+      .catch((e) => toast(e.message, 'err'));
     loadLedger($('selLedgerAccount').value).catch((e) => toast(e.message, 'err'));
   }
 }
@@ -678,7 +706,7 @@ function tokenCell(a) {
 function renderAccounts(list) {
   accounts = list || [];
   if (!accounts.length) {
-    $('accountRows').innerHTML = '<tr><td colspan="6" class="empty">还没有账号，点「导入账号」或到 CPA 里登录</td></tr>';
+    $('accountRows').innerHTML = '<tr><td colspan="8" class="empty">还没有账号，点「导入账号」或到 CPA 里登录</td></tr>';
     return;
   }
   $('accountRows').innerHTML = accounts.map((a) => {
@@ -692,6 +720,8 @@ function renderAccounts(list) {
     }
     return '<tr>' +
       '<td><div><strong>' + esc(a.alias || a.id) + '</strong></div><div class="cell-sub mono">' + esc(a.id || '') + '</div></td>' +
+      '<td>' + identityCell(a) + '</td>' +
+      '<td>' + esc(a.device_name || '—') + '<div class="cell-sub mono">' + esc((a.device_id || '').slice(0, 13) || '—') + '</div></td>' +
       '<td>' + esc(a.source || '—') + '<div class="cell-sub">user ' + esc(a.user_id || '—') + '</div></td>' +
       '<td>' + esc(a.priority) + '</td>' +
       '<td>' + tokenCell(a) + '</td>' +
@@ -830,6 +860,71 @@ function walletRows(wallets) {
   }).join('');
 }
 
+function identityCell(a) {
+  const email = a.email || (a.user_name && a.user_name.indexOf('@') > 0 ? a.user_name : '');
+  const phone = a.user_phone || '';
+  const main = email || a.user_name || phone || '—';
+  const sub = email && phone ? phone : (a.user_name && email && a.user_name !== email ? a.user_name : '');
+  return esc(main) + (sub ? '<div class="cell-sub">' + esc(sub) + '</div>' : '');
+}
+
+function taskClaimable(task) {
+  if (!task || task.done || task.reward <= 0) return false;
+  return task.type === 'daily' || (task.client_triggered && String(task.id).indexOf('daily_') === 0);
+}
+
+function taskStatus(task) {
+  if (task.done) return '<span class="pill ok">已完成</span>';
+  if (taskClaimable(task)) return '<span class="pill warn">可领取</span>';
+  return '<span class="pill neutral">需手动</span>';
+}
+
+function renderTasks(data) {
+  const tasks = data.tasks || [];
+  const account = data.account || '—';
+  $('taskMeta').textContent = data.ok
+    ? '账号 ' + account + ' · 今日登录奖励 ' + fmt(data.today_points || 0) + ' 积分' + (data.reward_date ? ' · 上次领取 ' + data.reward_date : '')
+    : (data.message || '读取任务失败');
+  $('taskSummary').innerHTML = [
+    '<span class="chip">可领任务 <b>' + fmt(data.claimable || 0) + '</b></span>',
+    '<span class="chip">可领积分 <b>' + fmt(data.claimable_points || 0) + '</b></span>',
+    '<span class="chip">今日登录奖励 <b>' + fmt(data.today_points || 0) + '</b></span>',
+    (data.today_entries || []).length ? '<span class="chip">' + esc((data.today_entries || []).join('、')) + '</span>' : '<span class="chip">今天还没有登录奖励</span>',
+  ].join('');
+  if (!data.ok) {
+    $('taskRows').innerHTML = '<tr><td colspan="6" class="empty">' + esc(data.message || '读取任务失败') + '</td></tr>';
+    return;
+  }
+  if (!tasks.length) {
+    $('taskRows').innerHTML = '<tr><td colspan="6" class="empty">上游没有返回任务</td></tr>';
+    return;
+  }
+  $('taskRows').innerHTML = tasks.map(function (t) {
+    const btn = taskClaimable(t)
+      ? '<button class="btn sm" data-task="' + esc(t.id) + '">领取</button>'
+      : '';
+    return '<tr>' +
+      '<td><strong>' + esc(t.title || t.id) + '</strong><div class="cell-sub mono">' + esc(t.id) + '</div></td>' +
+      '<td class="num">' + fmt(t.reward) + '</td>' +
+      '<td>' + esc(t.type || '—') + '</td>' +
+      '<td>' + taskStatus(t) + '</td>' +
+      '<td class="cell-sub">' + esc(t.description || '') + '</td>' +
+      '<td>' + btn + '</td>' +
+      '</tr>';
+  }).join('');
+
+  const sel = $('selTaskAccount');
+  const current = sel.value || data.account_id || '';
+  sel.innerHTML = (accounts || []).map(function (a) {
+    return '<option value="' + esc(a.id) + '">' + esc(a.alias || a.id) + '</option>';
+  }).join('');
+  if (current && (accounts || []).some(function (a) { return a.id === current; })) {
+    sel.value = current;
+  } else if (data.account_id) {
+    sel.value = data.account_id;
+  }
+}
+
 function renderCredits(data) {
   const list = data.accounts || [];
   const summary = data.summary || {};
@@ -934,6 +1029,24 @@ async function loadLedger(accountID) {
   renderLedger(data);
 }
 
+async function loadTasks(accountID) {
+  const query = accountID ? '?account=' + encodeURIComponent(accountID) : '';
+  const data = await api('/tasks' + query);
+  renderTasks(data);
+  return data;
+}
+
+async function claimDaily(accountID, taskID) {
+  const data = await api('/tasks/claim', {
+    method: 'POST',
+    body: JSON.stringify({ account: accountID || '', task_id: taskID || '' }),
+  });
+  toast(data.message || '已处理', data.ok ? 'ok' : 'warn');
+  await loadTasks(accountID);
+  await loadCredits(true).catch(function () {});
+  return data;
+}
+
 async function loadConfig() {
   const data = await api('/config');
   renderKv($('kvConfig'), data.config || []);
@@ -978,6 +1091,39 @@ $('btnLogs').addEventListener('click', loadLogs);
 $('btnRequests').addEventListener('click', () => loadRequests().catch((e) => toast(e.message, 'err')));
 $('selReqLimit').addEventListener('change', () => loadRequests().catch((e) => toast(e.message, 'err')));
 $('btnLedger').addEventListener('click', () => loadLedger($('selLedgerAccount').value).catch((e) => toast(e.message, 'err')));
+$('btnClaimDaily').addEventListener('click', () => {
+  const btn = $('btnClaimDaily');
+  btn.disabled = true;
+  btn.textContent = '领取中…';
+  claimDaily($('selTaskAccount').value)
+    .catch((e) => toast(e.message, 'err'))
+    .finally(() => { btn.disabled = false; btn.textContent = '领取每日积分'; });
+});
+$('btnLoginReward').addEventListener('click', async () => {
+  const btn = $('btnLoginReward');
+  btn.disabled = true;
+  btn.textContent = '触发中…';
+  try {
+    const data = await api('/rewards/login', { method: 'POST', body: JSON.stringify({ account: $('selTaskAccount').value }) });
+    toast(data.message || '已触发', data.ok ? 'ok' : 'warn');
+    await loadTasks($('selTaskAccount').value);
+    await loadCredits(true).catch(function () {});
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '触发登录奖励';
+  }
+});
+$('selTaskAccount').addEventListener('change', () => loadTasks($('selTaskAccount').value).catch((e) => toast(e.message, 'err')));
+$('taskRows').addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-task]');
+  if (!btn) return;
+  btn.disabled = true;
+  claimDaily($('selTaskAccount').value, btn.dataset.task)
+    .catch((e) => toast(e.message, 'err'))
+    .finally(() => { btn.disabled = false; });
+});
 $('selLedgerAccount').addEventListener('change', () => loadLedger($('selLedgerAccount').value).catch((e) => toast(e.message, 'err')));
 $('btnCreditRefresh').addEventListener('click', async () => {
   try {

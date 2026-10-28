@@ -52,6 +52,8 @@ type creditLedger struct {
 	Reason      string `json:"reason"`
 	Description string `json:"description"`
 	RequestID   string `json:"request_id,omitempty"`
+	EventType   string `json:"event_type,omitempty"`
+	GrantDate   string `json:"grant_date,omitempty"`
 	TokensIn    int64  `json:"tokens_in"`
 	TokensOut   int64  `json:"tokens_out"`
 	CacheTokens int64  `json:"cache_tokens"`
@@ -133,6 +135,10 @@ func (a *app) fetchCredits(ctx context.Context, account *credential) (creditSnap
 }
 
 func (a *app) fetchLedgers(ctx context.Context, account *credential, limit int) ([]creditLedger, error) {
+	return a.fetchLedgersWith(ctx, account, limit, "")
+}
+
+func (a *app) fetchLedgersWith(ctx context.Context, account *credential, limit int, direction string) ([]creditLedger, error) {
 	cfg := a.currentConfig()
 	if account == nil || account.AccessToken == "" {
 		return nil, fmt.Errorf("账号没有 access_token")
@@ -141,6 +147,9 @@ func (a *app) fetchLedgers(ctx context.Context, account *credential, limit int) 
 		limit = 50
 	}
 	endpoint := cfg.AuthBaseURL + creditsLedgersPath + "?asset_type=point&wallet_type=all&page_size=" + strconv.Itoa(limit)
+	if direction != "" {
+		endpoint += "&flow_direction=" + direction
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -176,6 +185,8 @@ func (a *app) fetchLedgers(ctx context.Context, account *credential, limit int) 
 					TokenUsage  string `json:"token_usage"`
 					WalletType  string `json:"public_wallet_type"`
 					Description string `json:"description"`
+					EventType   string `json:"event_type"`
+					GrantDate   string `json:"grant_date"`
 				} `json:"metadata"`
 			} `json:"entries"`
 		} `json:"data"`
@@ -202,6 +213,8 @@ func (a *app) fetchLedgers(ctx context.Context, account *credential, limit int) 
 			Reason:      item.Metadata.Reason,
 			Description: firstNonEmpty(item.Description, item.Metadata.Description),
 			RequestID:   item.Metadata.RequestID,
+			EventType:   item.Metadata.EventType,
+			GrantDate:   item.Metadata.GrantDate,
 			TokensIn:    in,
 			TokensOut:   out,
 			CacheTokens: cache,
@@ -232,6 +245,13 @@ func parseTokenUsage(raw string) (in, out, cache int64) {
 		}
 	}
 	return in, out, cache
+}
+
+// dropCreditsCache forgets one account's cached balance, so the next read is fresh.
+func (a *app) dropCreditsCache(accountID string) {
+	a.creditMu.Lock()
+	delete(a.credits, accountID)
+	a.creditMu.Unlock()
 }
 
 // creditsFor returns a cached balance, refreshing it when stale. Failures are
