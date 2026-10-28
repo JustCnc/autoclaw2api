@@ -13,6 +13,7 @@
 - `models`：从 `GET /autoclaw-proxy/proxy/autoclaw-model-config` 拉取模型目录并缓存
 - 多账号：配置里的主账号 + `accounts_dir/*.json` + CPA 里导入的 auth JSON
 - 授权登录：插件内置本机登录页，手机号 + 短信验证码登录 AutoClaw
+- 插件页面：CPA 里的「AutoClaw2API」控制台（账号池 / 模型 / 日志 / 配置 / 测试对话）
 - token 自动续期：`/userapi/v1/refresh`，必要时回退 `/userapi/v1/agent-refresh`
 - 出站伪装：
   - `X-Version` / `X-Tm` / `X-Product` / `X-Channel` / `X-Lang`
@@ -40,6 +41,8 @@ executor.go             chat / stream 执行
 ratelimit.go            按账号的本地令牌桶与上游 403 限流识别
 sse.go                  SSE 解析与聚合
 login.go / loginpage.go 手机号授权登录页
+management.go           插件页面注册、管理接口、账号操作
+web/console.html        内嵌控制台页面（go:embed）
 state.go                私有数据、日志
 tools/export-autoclaw-account.mjs
                         从本机 AutoClaw 登录态导出账号 JSON
@@ -140,6 +143,28 @@ checksums.txt                             → sha256 校验
 
 <https://github.com/JustCnc/autoclaw2api/releases>
 
+## 插件页面
+
+安装并启用插件后，CPA 的插件菜单里会出现「AutoClaw2API」，对应地址：
+
+```text
+/v0/resource/plugins/autoclaw2api/console
+```
+
+页面只有一个 HTML + 原生 JS，不需要额外静态资源，也不占端口。包含：
+
+- **概览**：账号池可用数、模型数量、本地限速、运行时长、上游指纹摘要、最近日志
+- **账号**：列表（固定高度滚动）、刷新 token、重置冷却、禁用/启用、移除、导入、导出
+- **模型**：目录列表（固定高度滚动）、上下文/最大输出、是否对外暴露、手动刷新目录
+- **日志**：环形缓冲（固定高度滚动），可关自动刷新
+- **设置**：只读生效配置，token 类字段打码
+
+所有列表容器都限制了最大高度（表格 400px、日志 440px、配置 420px、概览日志 200px）
+并独立滚动，账号或日志再多也不会把页面撑长。
+
+页面通过 `<管理密钥>` 调用 `/v0/management/autoclaw2api/*`：在右上角「管理密钥」里填
+CPA 的 `management.secret-key`，只存本机 `localStorage`；也可以用
+`?key=<secret-key>` 直接带上。没设置密钥时留空即可。
 ## 构建
 
 ```bash

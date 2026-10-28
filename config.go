@@ -255,6 +255,14 @@ func (c Config) refreshMargin() time.Duration {
 	return time.Duration(c.RefreshMargin) * time.Second
 }
 
+func (c Config) loginBind() string {
+	bind := strings.TrimSpace(c.LoginBind)
+	if bind == "" {
+		return "127.0.0.1"
+	}
+	return bind
+}
+
 func (c Config) rateLimit() (float64, int) {
 	if c.RateLimitRPM <= 0 {
 		return 0, 0

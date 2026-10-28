@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light" />
+<title>AutoClaw2API · 控制台</title>
+<style>
+  :root {
+    --bg-page:#f6f7f9; --bg-panel:#fff; --bg-subtle:#f2f4f7; --bg-muted:#e5e8ee;
+    --border:#e3e6ec; --border-strong:#cfd5df;
+    --text:#111827; --text-muted:#6b7280; --text-subtle:#9aa1ab;
+    --primary:#4338ca; --primary-hover:#3730a3; --primary-subtle:#eef0ff; --primary-border:#c7ccff;
+    --ok:#15803d; --ok-subtle:#eefbf1; --ok-border:#bfe8cb;
+    --warn:#b45309; --warn-subtle:#fff8ec; --warn-border:#f3ddb3;
+    --bad:#b91c1c; --bad-subtle:#fdf1f1; --bad-border:#f1c6c6;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+    --shadow:0 1px 2px rgba(16,24,40,.06);
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    background:var(--bg-page); color:var(--text); font-size:14px; line-height:1.5;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono { font-family:var(--mono); }
+
+  header { position:sticky; top:0; z-index:30; background:var(--bg-panel); border-bottom:1px solid var(--border); }
+  .header-inner { max-width:1240px; margin:0 auto; padding:12px 22px; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  .brand { display:flex; align-items:center; gap:11px; }
+  .brand-icon { width:34px; height:34px; border-radius:9px; background:linear-gradient(135deg,#6366f1,#4338ca); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:15px; box-shadow:var(--shadow); }
+  .brand h1 { font-size:15.5px; font-weight:650; display:flex; align-items:center; gap:8px; }
+  .brand p { font-size:11.5px; color:var(--text-muted); }
+  .header-right { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+
+  .badge { font-size:11px; padding:1px 7px; border-radius:999px; background:var(--bg-subtle); color:var(--text-muted); border:1px solid var(--border); font-weight:600; }
+  .pill { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:999px; font-size:11.5px; font-weight:500; border:1px solid transparent; white-space:nowrap; }
+  .dot { width:6px; height:6px; border-radius:50%; background:currentColor; flex:none; }
+  .pill.ok { background:var(--ok-subtle); color:var(--ok); border-color:var(--ok-border); }
+  .pill.warn { background:var(--warn-subtle); color:var(--warn); border-color:var(--warn-border); }
+  .pill.bad { background:var(--bad-subtle); color:var(--bad); border-color:var(--bad-border); }
+  .pill.neutral { background:var(--bg-subtle); color:var(--text-muted); border-color:var(--border); }
+  .pill.primary { background:var(--primary-subtle); color:var(--primary); border-color:var(--primary-border); }
+
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:7px 13px; font-size:13px; font-weight:500; border-radius:8px; border:1px solid var(--border-strong); background:#fff; color:var(--text); cursor:pointer; white-space:nowrap; box-shadow:var(--shadow); transition:background .15s,border-color .15s; }
+  .btn:hover { background:var(--bg-subtle); }
+  .btn:disabled { opacity:.55; cursor:default; }
+  .btn.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+  .btn.primary:hover { background:var(--primary-hover); border-color:var(--primary-hover); }
+  .btn.sm { padding:3px 9px; font-size:12px; border-radius:6px; box-shadow:none; }
+  .btn.ghost { border-color:transparent; background:transparent; box-shadow:none; color:var(--text-muted); }
+  .btn.ghost:hover { background:var(--bg-subtle); color:var(--text); }
+  .btn.danger { color:var(--bad); border-color:var(--bad-border); }
+  .btn.danger:hover { background:var(--bad-subtle); }
+
+  nav { background:var(--bg-panel); border-bottom:1px solid var(--border); }
+  .nav-inner { max-width:1240px; margin:0 auto; padding:0 22px; display:flex; gap:22px; overflow-x:auto; }
+  .tab { padding:12px 2px; background:none; border:none; border-bottom:2px solid transparent; color:var(--text-muted); font-size:13.5px; font-weight:500; cursor:pointer; white-space:nowrap; }
+  .tab:hover { color:var(--text); }
+  .tab.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
+
+  main { max-width:1240px; margin:0 auto; padding:22px; }
+  .view { display:none; }
+  .view.active { display:block; }
+
+  .grid-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:16px; }
+  @media (max-width:1000px) { .grid-stats { grid-template-columns:repeat(2,1fr); } }
+  @media (max-width:600px) { .grid-stats { grid-template-columns:1fr; } }
+  .card { background:var(--bg-panel); border:1px solid var(--border); border-radius:11px; box-shadow:var(--shadow); }
+  .stat { padding:14px 16px; }
+  .stat-label { font-size:12px; color:var(--text-muted); font-weight:500; }
+  .stat-value { font-size:25px; font-weight:700; letter-spacing:-.01em; margin:6px 0 2px; }
+  .stat-value small { font-size:13px; font-weight:500; color:var(--text-subtle); }
+  .stat-foot { font-size:11.5px; color:var(--text-subtle); }
+
+  .card-head { padding:13px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .card-title { font-size:14px; font-weight:600; }
+  .card-desc { font-size:11.5px; color:var(--text-muted); margin-top:2px; }
+  .card-body { padding:16px; }
+  .card-body.tight { padding:10px 12px; }
+  .stack { display:grid; gap:16px; }
+  .split { display:grid; grid-template-columns:1.5fr 1fr; gap:16px; align-items:start; }
+  @media (max-width:980px) { .split { grid-template-columns:1fr; } }
+
+  /* every list is height-limited and scrolls */
+  .scroll { overflow:auto; overscroll-behavior:contain; }
+  .scroll.table { max-height:400px; }
+  .scroll.logs { max-height:440px; }
+  .scroll.kv { max-height:420px; }
+  .scroll.preview { max-height:200px; }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  thead th { position:sticky; top:0; z-index:1; background:var(--bg-subtle); text-align:left; padding:9px 14px; font-size:11px; letter-spacing:.04em; text-transform:uppercase; color:var(--text-muted); border-bottom:1px solid var(--border); white-space:nowrap; }
+  tbody td { padding:11px 14px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  tbody tr:last-child td { border-bottom:none; }
+  tbody tr:hover td { background:#fafbfc; }
+  .cell-sub { font-size:11px; color:var(--text-subtle); margin-top:2px; }
+  .row-actions { display:flex; gap:6px; flex-wrap:wrap; }
+  .empty { padding:26px 16px; text-align:center; color:var(--text-subtle); font-size:13px; }
+
+  .kv-row { display:flex; gap:12px; padding:7px 14px; border-bottom:1px solid var(--border); font-size:12.5px; }
+  .kv-row:last-child { border-bottom:none; }
+  .kv-key { color:var(--text-muted); flex:0 0 190px; }
+  .kv-val { flex:1; word-break:break-all; font-family:var(--mono); font-size:11.5px; }
+
+  pre.logs { padding:12px 14px; font-family:var(--mono); font-size:11.5px; line-height:1.65; white-space:pre-wrap; word-break:break-word; color:#243044; }
+
+  .modal-backdrop { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:center; justify-content:center; padding:20px; z-index:60; }
+  .modal-backdrop.open { display:flex; }
+  .modal { background:#fff; border-radius:12px; width:100%; max-width:620px; box-shadow:0 24px 48px rgba(15,23,42,.22); display:flex; flex-direction:column; max-height:86vh; }
+  .modal-head { padding:14px 18px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+  .modal-title { font-size:14.5px; font-weight:600; }
+  .modal-body { padding:16px 18px; overflow:auto; }
+  .modal-foot { padding:12px 18px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px; }
+  label.field { display:block; font-size:12.5px; font-weight:500; margin-bottom:6px; color:var(--text-muted); }
+  input[type=text], input[type=password], textarea, select {
+    width:100%; padding:8px 10px; font-size:13px; border:1px solid var(--border-strong); border-radius:8px;
+    font-family:inherit; background:#fff; color:var(--text); outline:none;
+  }
+  input:focus, textarea:focus, select:focus { border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-subtle); }
+  textarea { resize:vertical; min-height:120px; font-family:var(--mono); font-size:12px; }
+  .hint { font-size:11.5px; color:var(--text-subtle); margin-top:6px; }
+
+  .toast-box { position:fixed; right:18px; bottom:18px; display:flex; flex-direction:column; gap:8px; z-index:80; }
+  .toast { background:#111827; color:#fff; padding:10px 14px; border-radius:8px; font-size:12.5px; max-width:380px; box-shadow:0 10px 24px rgba(15,23,42,.28); }
+  .toast.err { background:#991b1b; }
+  .toast.ok { background:#14532d; }
+  .toast.fade { opacity:0; transition:opacity .25s; }
+
+  .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .muted { color:var(--text-muted); font-size:12px; }
+  .inline { display:inline-flex; align-items:center; gap:6px; }
+  .switch { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:var(--text-muted); cursor:pointer; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="brand">
+      <div class="brand-icon">AC</div>
+      <div>
+        <h1>AutoClaw2API <span class="badge" id="lblVersion">v—</span></h1>
+        <p>AutoClaw 桌面端模型网关 · OpenAI 兼容反代</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="pill neutral" id="pillConn"><span class="dot"></span> 连接中…</span>
+      <button class="btn sm" id="btnKey">管理密钥</button>
+      <button class="btn sm primary" id="btnRefresh">刷新</button>
+    </div>
+  </div>
+</header>
+
+<nav>
+  <div class="nav-inner">
+    <button class="tab active" data-view="overview">概览</button>
+    <button class="tab" data-view="accounts">账号 <span class="badge" id="badgeAccounts">0</span></button>
+    <button class="tab" data-view="models">模型 <span class="badge" id="badgeModels">0</span></button>
+    <button class="tab" data-view="logs">日志</button>
+    <button class="tab" data-view="settings">设置</button>
+  </div>
+</nav>
+
+<main>
+  <!-- 概览 -->
+  <section class="view active" id="view-overview">
+    <div class="grid-stats">
+      <div class="card stat">
+        <div class="stat-label">账号池</div>
+        <div class="stat-value" id="statAccounts">—</div>
+        <div class="stat-foot" id="statAccountsFoot">可用 — · 冷却 —</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-label">模型</div>
+        <div class="stat-value" id="statModels">—</div>
+        <div class="stat-foot" id="statModelsFoot">目录来源 —</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-label">本地限速</div>
+        <div class="stat-value" id="statLimit">—</div>
+        <div class="stat-foot" id="statLimitFoot">上游实测约 30 次/分钟</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-label">运行时长</div>
+        <div class="stat-value" id="statUptime">—</div>
+        <div class="stat-foot" id="statStarted">启动于 —</div>
+      </div>
+    </div>
+
+    <div class="split">
+      <div class="stack">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">快捷操作</div>
+              <div class="card-desc">所有操作走插件管理接口，失败会在右下角提示</div>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="toolbar">
+              <button class="btn sm" id="btnCatalog">刷新模型目录</button>
+              <button class="btn sm" id="btnRefreshAll">刷新全部 token</button>
+              <button class="btn sm" id="btnResetAll">重置全部冷却</button>
+              <button class="btn sm" id="btnAddAccount">新增账号</button>
+              <button class="btn sm" id="btnTest">测试对话</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">上游与指纹</div>
+              <div class="card-desc">出站请求按 AutoClaw 桌面客户端构造</div>
+            </div>
+          </div>
+          <div class="card-body tight">
+            <div class="kv scroll kv" id="kvUpstream"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">最近日志</div>
+            <div class="card-desc">只保留最近的诊断行</div>
+          </div>
+          <button class="btn sm ghost" data-goto="logs">查看全部</button>
+        </div>
+        <div class="card-body tight">
+          <div class="scroll preview"><pre class="logs" id="logPreview">暂无日志</pre></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 账号 -->
+  <section class="view" id="view-accounts">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">账号池</div>
+          <div class="card-desc">列表固定高度滚动；来自 config.yaml 的主账号不能在此删除</div>
+        </div>
+        <div class="toolbar">
+          <button class="btn sm" id="btnImport">导入账号</button>
+          <button class="btn sm" id="btnExport">导出账号</button>
+          <button class="btn sm" id="btnRefreshAll2">刷新全部</button>
+        </div>
+      </div>
+      <div class="scroll table">
+        <table>
+          <thead>
+            <tr>
+              <th>账号</th><th>来源</th><th>优先级</th><th>Token</th><th>状态</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="accountRows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 模型 -->
+  <section class="view" id="view-models">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">模型目录</div>
+          <div class="card-desc" id="modelMeta">—</div>
+        </div>
+        <button class="btn sm" id="btnCatalog2">刷新目录</button>
+      </div>
+      <div class="scroll table">
+        <table>
+          <thead>
+            <tr><th>模型 ID</th><th>名称</th><th>上下文</th><th>最大输出</th><th>推理</th><th>输入</th><th>对外暴露</th></tr>
+          </thead>
+          <tbody id="modelRows"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section class="view" id="view-logs">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">插件日志</div>
+          <div class="card-desc">环形缓冲，重启后清空</div>
+        </div>
+        <div class="toolbar">
+          <label class="switch"><input type="checkbox" id="chkAutoLog" checked /> 自动刷新</label>
+          <button class="btn sm" id="btnLogs">刷新</button>
+        </div>
+      </div>
+      <div class="card-body tight">
+        <div class="scroll logs"><pre class="logs" id="logFull">暂无日志</pre></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section class="view" id="view-settings">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">生效配置</div>
+          <div class="card-desc">只读；密钥类字段已打码。修改请编辑 CPA 的 config.yaml 后重载。</div>
+        </div>
+      </div>
+      <div class="card-body tight">
+        <div class="kv scroll kv" id="kvConfig"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- 管理密钥 -->
+<div class="modal-backdrop" id="modalKey">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-head"><div class="modal-title">管理密钥</div><button class="btn sm ghost" data-close="modalKey">关闭</button></div>
+    <div class="modal-body">
+      <label class="field">CPA 的 management.secret-key</label>
+      <input type="password" id="txtKey" placeholder="留空表示没设置密钥" />
+      <div class="hint">密钥只保存在本机 localStorage，用于访问 <code class="mono">/v0/management/autoclaw2api</code>。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn sm" data-close="modalKey">取消</button>
+      <button class="btn sm primary" id="btnSaveKey">保存并连接</button>
+    </div>
+  </div>
+</div>
+
+<!-- 导入账号 -->
+<div class="modal-backdrop" id="modalImport">
+  <div class="modal">
+    <div class="modal-head"><div class="modal-title">导入账号</div><button class="btn sm ghost" data-close="modalImport">关闭</button></div>
+    <div class="modal-body">
+      <label class="field">账号 JSON</label>
+      <textarea id="txtImport" placeholder='{"access_token":"…","refresh_token":"…","device_id":"…","alias":"work"}'></textarea>
+      <div class="hint">支持单个对象、对象数组、<code class="mono">{"accounts":[…]}</code> 或每行一个 JSON。可以用 <code class="mono">node tools/export-autoclaw-account.mjs</code> 在本机导出。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn sm" data-close="modalImport">取消</button>
+      <button class="btn sm primary" id="btnDoImport">导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 测试对话 -->
+<div class="modal-backdrop" id="modalTest">
+  <div class="modal">
+    <div class="modal-head"><div class="modal-title">测试对话</div><button class="btn sm ghost" data-close="modalTest">关闭</button></div>
+    <div class="modal-body">
+      <label class="field">模型</label>
+      <select id="selTestModel"></select>
+      <div style="height:12px"></div>
+      <label class="field">提示词</label>
+      <input type="text" id="txtTestPrompt" value="Say OK" />
+      <div style="height:12px"></div>
+      <label class="field">结果</label>
+      <div class="scroll" style="max-height:220px"><pre class="logs" id="preTest">—</pre></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn sm" data-close="modalTest">关闭</button>
+      <button class="btn sm primary" id="btnDoTest">发送</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新增账号 -->
+<div class="modal-backdrop" id="modalLogin">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-head"><div class="modal-title">新增账号（手机号）</div><button class="btn sm ghost" data-close="modalLogin">关闭</button></div>
+    <div class="modal-body">
+      <p class="muted" id="loginState">点击「打开授权页」，在插件本机页面完成手机号验证。</p>
+      <div style="height:12px"></div>
+      <div class="scroll" style="max-height:180px"><pre class="logs" id="preLogin">—</pre></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn sm" data-close="modalLogin">关闭</button>
+      <button class="btn sm primary" id="btnDoLogin">打开授权页</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-box" id="toastBox"></div>
+
+<script>
+const API = '/v0/management/autoclaw2api';
+const KEY_STORE = 'autoclaw2api.managementKey';
+const GUESS_KEYS = ['cli-proxy-api-management-key', 'management-key', 'cpa-management-key', 'managementKey'];
+
+let key = localStorage.getItem(KEY_STORE) || '';
+let statusTimer = null;
+let logTimer = null;
+let loginPoll = null;
+let models = [];
+let accounts = [];
+
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+const fmt = (n) => (n == null ? '—' : String(n));
+
+function toast(message, kind) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + (kind || '');
+  el.textContent = message;
+  $('toastBox').appendChild(el);
+  setTimeout(() => el.classList.add('fade'), 3200);
+  setTimeout(() => el.remove(), 3600);
+}
+
+function setConn(ok, text) {
+  const el = $('pillConn');
+  el.className = 'pill ' + (ok ? 'ok' : 'bad');
+  el.innerHTML = '<span class="dot"></span> ' + esc(text);
+}
+
+async function api(path, options) {
+  const opts = options || {};
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+  if (key) headers['Authorization'] = 'Bearer ' + key;
+  const resp = await fetch(API + path, Object.assign({}, opts, { headers }));
+  if (resp.status === 401 || resp.status === 403 || resp.status === 404) {
+    const detail = await resp.text().catch(() => '');
+    const notSet = resp.status === 404 || detail.includes('remote management key not set');
+    setConn(false, notSet ? '未启用管理接口' : '需要密钥');
+    const err = new Error(notSet ? '这台 CPA 没有启用管理接口' : (key ? '管理密钥无效' : '需要管理密钥'));
+    err.auth = true;
+    throw err;
+  }
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '');
+    throw new Error('HTTP ' + resp.status + (detail ? '：' + detail.slice(0, 160) : ''));
+  }
+  return resp.json();
+}
+
+/* ---------- views ---------- */
+function showView(name) {
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
+  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
+  if (name === 'logs') loadLogs();
+}
+
+document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => showView(tab.dataset.view)));
+document.querySelectorAll('[data-goto]').forEach((btn) => btn.addEventListener('click', () => showView(btn.dataset.goto)));
+
+function openModal(id) { $(id).classList.add('open'); }
+function closeModal(id) { $(id).classList.remove('open'); }
+document.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeModal(btn.dataset.close)));
+document.querySelectorAll('.modal-backdrop').forEach((bd) => bd.addEventListener('click', (e) => { if (e.target === bd) bd.classList.remove('open'); }));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') document.querySelectorAll('.modal-backdrop.open').forEach((el) => el.classList.remove('open')); });
+
+/* ---------- render ---------- */
+function renderStatus(s) {
+  $('lblVersion').textContent = 'v' + (s.version || '?');
+  $('statAccounts').textContent = fmt((s.accounts || {}).total) + ' 个';
+  $('statAccountsFoot').textContent = '可用 ' + fmt((s.accounts || {}).usable) + ' · 冷却 ' + fmt((s.accounts || {}).cooling) + ' · 禁用 ' + fmt((s.accounts || {}).disabled);
+  $('badgeAccounts').textContent = fmt((s.accounts || {}).total);
+  $('statModels').textContent = fmt((s.catalog || {}).exposed) + ' / ' + fmt((s.catalog || {}).count);
+  $('statModelsFoot').textContent = '目录 ' + ((s.catalog || {}).source || '—') + ' · 默认 ' + ((s.catalog || {}).default || '—');
+  $('badgeModels').textContent = fmt((s.catalog || {}).exposed);
+  const limit = s.limit || {};
+  $('statLimit').textContent = (limit.rpm || 0) + ' / 分钟';
+  $('statLimitFoot').textContent = '突发 ' + (limit.burst || 0) + ' 次 · 上游约 40 次';
+
+  const started = s.started_at ? new Date(s.started_at) : null;
+  if (started && !isNaN(started)) {
+    const mins = Math.max(0, Math.round((Date.now() - started.getTime()) / 60000));
+    const h = Math.floor(mins / 60), m = mins % 60;
+    $('statUptime').textContent = h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+    $('statStarted').textContent = '启动于 ' + started.toLocaleString();
+  } else {
+    $('statUptime').textContent = '—';
+    $('statStarted').textContent = '启动于 —';
+  }
+
+  const upstream = s.upstream || {};
+  const conf = s.config || {};
+  $('kvUpstream').innerHTML = [
+    ['base_url', upstream.base_url],
+    ['auth_base_url', upstream.auth_base_url],
+    ['client_version', upstream.client_version],
+    ['product / channel', (upstream.product || '') + ' / ' + (upstream.channel || '')],
+    ['data_dir', conf.data_dir],
+    ['授权登录页', (conf.login_bind || '127.0.0.1') + ':' + (conf.login_port || '')],
+    ['模型前缀', conf.model_prefix],
+    ['服务时间', s.server_time],
+  ].map(([k, v]) => '<div class="kv-row"><span class="kv-key">' + esc(k) + '</span><span class="kv-val">' + esc(v || '—') + '</span></div>').join('');
+}
+
+function statusPill(a) {
+  if (a.disabled) return '<span class="pill neutral"><span class="dot"></span> 已禁用</span>';
+  if (a.dead) return '<span class="pill bad"><span class="dot"></span> 失效</span>';
+  if (a.cooling) return '<span class="pill warn"><span class="dot"></span> 冷却 ' + Math.max(0, a.cooldown_left_seconds | 0) + 's</span>';
+  return '<span class="pill ok"><span class="dot"></span> 可用</span>';
+}
+
+function tokenCell(a) {
+  const parts = [];
+  if (a.expires_at) {
+    const left = a.expires_in_seconds | 0;
+    const text = left > 0 ? Math.round(left / 60) + ' 分钟后过期' : '已过期';
+    parts.push('<div>' + esc(text) + '</div>');
+  } else {
+    parts.push('<div>无过期时间</div>');
+  }
+  parts.push('<div class="cell-sub mono">' + esc(a.token_tail || '') + (a.has_refresh_token ? ' · 可刷新' : ' · 无 refresh') + '</div>');
+  return parts.join('');
+}
+
+function renderAccounts(list) {
+  accounts = list || [];
+  if (!accounts.length) {
+    $('accountRows').innerHTML = '<tr><td colspan="6" class="empty">还没有账号，点「导入账号」或到 CPA 里登录</td></tr>';
+    return;
+  }
+  $('accountRows').innerHTML = accounts.map((a) => {
+    const actions = [
+      '<button class="btn sm" data-act="refresh" data-id="' + esc(a.id) + '">刷新</button>',
+      '<button class="btn sm" data-act="reset" data-id="' + esc(a.id) + '">重置</button>',
+      '<button class="btn sm" data-act="disable" data-id="' + esc(a.id) + '" data-disabled="' + (a.disabled ? '0' : '1') + '">' + (a.disabled ? '启用' : '禁用') + '</button>',
+    ];
+    if (!a.config_managed) {
+      actions.push('<button class="btn sm danger" data-act="delete" data-id="' + esc(a.id) + '">移除</button>');
+    }
+    return '<tr>' +
+      '<td><div><strong>' + esc(a.alias || a.id) + '</strong></div><div class="cell-sub mono">' + esc(a.id || '') + '</div></td>' +
+      '<td>' + esc(a.source || '—') + '<div class="cell-sub">user ' + esc(a.user_id || '—') + '</div></td>' +
+      '<td>' + esc(a.priority) + '</td>' +
+      '<td>' + tokenCell(a) + '</td>' +
+      '<td>' + statusPill(a) + (a.last_error ? '<div class="cell-sub">' + esc(a.last_error.slice(0, 60)) + '</div>' : '') + '</td>' +
+      '<td><div class="row-actions">' + actions.join('') + '</div></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function humanTokens(n) {
+  if (!n) return '—';
+  if (n >= 1048576) return (n / 1048576).toFixed(n % 1048576 === 0 ? 0 : 1) + 'M';
+  if (n >= 1024) return Math.round(n / 1024) + 'K';
+  return String(n);
+}
+
+function renderModels(data) {
+  models = data.models || [];
+  const exposed = new Set((data.exposed || []).map((m) => m.ID));
+  $('modelMeta').textContent = '来源 ' + (data.source || '—') + ' · ' + models.length + ' 个模型 · 默认 ' + (data.default || '—');
+  if (!models.length) {
+    $('modelRows').innerHTML = '<tr><td colspan="7" class="empty">还没有模型目录，点「刷新目录」</td></tr>';
+    return;
+  }
+  $('modelRows').innerHTML = models.map((m) => {
+    const id = 'autoclaw/' + m.id;
+    return '<tr>' +
+      '<td class="mono">' + esc(id) + '</td>' +
+      '<td>' + esc(m.name || '—') + (m.tooltip ? '<div class="cell-sub">' + esc(m.tooltip) + '</div>' : '') + '</td>' +
+      '<td>' + humanTokens(m.contextWindow) + '</td>' +
+      '<td>' + humanTokens(m.maxTokens) + '</td>' +
+      '<td>' + (m.reasoning ? '是' : '否') + '</td>' +
+      '<td>' + esc((m.input || []).join(', ') || 'text') + '</td>' +
+      '<td>' + (exposed.has(id) ? '<span class="pill ok">已暴露</span>' : '<span class="pill neutral">未暴露</span>') + '</td>' +
+      '</tr>';
+  }).join('');
+
+  const sel = $('selTestModel');
+  const current = sel.value;
+  sel.innerHTML = models.map((m) => '<option value="' + esc(m.id) + '">' + esc('autoclaw/' + m.id) + '</option>').join('');
+  if (current) sel.value = current;
+}
+
+function renderKv(target, items) {
+  if (!items.length) {
+    target.innerHTML = '<div class="empty">没有可展示的配置</div>';
+    return;
+  }
+  target.innerHTML = items.map((it) => '<div class="kv-row"><span class="kv-key">' + esc(it.key) + '</span><span class="kv-val">' + esc(it.value === '' ? '—' : it.value) + '</span></div>').join('');
+}
+
+function renderLogs(entries, target) {
+  const text = entries && entries.length ? entries.join('\n') : '暂无日志';
+  target.textContent = text;
+  target.scrollTop = target.scrollHeight;
+}
+
+/* ---------- loaders ---------- */
+async function loadStatus() {
+  const s = await api('/status');
+  setConn(true, '已连接');
+  renderStatus(s);
+  return s;
+}
+
+async function loadAccounts() {
+  const data = await api('/accounts');
+  renderAccounts(data.accounts || []);
+}
+
+async function loadModels() {
+  const data = await api('/models');
+  renderModels(data);
+}
+
+async function loadLogs() {
+  const data = await api('/logs?limit=300');
+  renderLogs(data.entries || [], $('logFull'));
+  renderLogs((data.entries || []).slice(-40), $('logPreview'));
+}
+
+async function loadConfig() {
+  const data = await api('/config');
+  renderKv($('kvConfig'), data.config || []);
+}
+
+async function refreshAll() {
+  try {
+    await loadStatus();
+    await loadAccounts();
+    await loadModels();
+    await loadLogs();
+    await loadConfig();
+  } catch (error) {
+    setConn(false, error.message);
+    if (error.auth) askKey(error);
+    else toast(error.message, 'err');
+  }
+}
+
+/* ---------- actions ---------- */
+async function post(path, body, label) {
+  try {
+    const result = await api(path, { method: 'POST', body: JSON.stringify(body || {}) });
+    toast(result.message || (label + ' 完成'), result.ok === false ? 'err' : 'ok');
+    await refreshAll();
+    return result;
+  } catch (error) {
+    toast(error.message, 'err');
+    if (error.auth) askKey(error);
+  }
+}
+
+$('btnRefresh').addEventListener('click', refreshAll);
+$('btnCatalog').addEventListener('click', () => post('/catalog/refresh', {}, '刷新目录'));
+$('btnCatalog2').addEventListener('click', () => post('/catalog/refresh', {}, '刷新目录'));
+$('btnRefreshAll').addEventListener('click', () => post('/accounts/refresh', {}, '刷新 token'));
+$('btnRefreshAll2').addEventListener('click', () => post('/accounts/refresh', {}, '刷新 token'));
+$('btnResetAll').addEventListener('click', () => post('/accounts/reset', {}, '重置冷却'));
+$('btnLogs').addEventListener('click', loadLogs);
+
+$('accountRows').addEventListener('click', async (event) => {
+  const btn = event.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const act = btn.dataset.act;
+  btn.disabled = true;
+  try {
+    if (act === 'refresh') await post('/accounts/refresh', { id }, '刷新');
+    if (act === 'reset') await post('/accounts/reset', { id }, '重置');
+    if (act === 'disable') await post('/accounts/disable', { id, disabled: btn.dataset.disabled === '1' }, '切换');
+    if (act === 'delete') {
+      if (confirm('从插件账号池移除这个账号？')) await post('/accounts/delete', { id }, '移除');
+    }
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('btnImport').addEventListener('click', () => { $('txtImport').value = ''; openModal('modalImport'); });
+$('btnDoImport').addEventListener('click', async () => {
+  const text = $('txtImport').value.trim();
+  if (!text) { toast('先粘贴账号 JSON', 'err'); return; }
+  const result = await post('/accounts/import', { text }, '导入');
+  if (result && result.ok !== false) closeModal('modalImport');
+});
+
+$('btnExport').addEventListener('click', async () => {
+  try {
+    const headers = key ? { Authorization: 'Bearer ' + key } : {};
+    const resp = await fetch(API + '/accounts/export', { headers });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'autoclaw2api-accounts.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast('已导出账号池', 'ok');
+  } catch (error) {
+    toast(error.message, 'err');
+  }
+});
+
+$('btnTest').addEventListener('click', async () => { await loadModels().catch(() => {}); $('preTest').textContent = '—'; openModal('modalTest'); });
+$('btnDoTest').addEventListener('click', async () => {
+  const model = $('selTestModel').value;
+  const prompt = $('txtTestPrompt').value.trim() || 'Say OK';
+  $('preTest').textContent = '请求中…';
+  try {
+    const result = await api('/test', { method: 'POST', body: JSON.stringify({ model: 'autoclaw/' + model, prompt }) });
+    $('preTest').textContent = JSON.stringify(result, null, 2);
+    toast(result.message || '完成', result.ok ? 'ok' : 'err');
+  } catch (error) {
+    $('preTest').textContent = error.message;
+    toast(error.message, 'err');
+  }
+});
+
+$('btnAddAccount').addEventListener('click', () => { $('preLogin').textContent = '—'; openModal('modalLogin'); });
+$('btnDoLogin').addEventListener('click', async () => {
+  try {
+    const start = await api('/login/start', { method: 'POST', body: '{}' });
+    if (!start.ok) { toast(start.message, 'err'); return; }
+    $('preLogin').textContent = '授权页：' + start.url + '\n等待浏览器完成手机号验证…';
+    window.open(start.url, '_blank');
+    clearInterval(loginPoll);
+    loginPoll = setInterval(async () => {
+      try {
+        const poll = await api('/login/poll', { method: 'POST', body: JSON.stringify({ state: start.state }) });
+        $('preLogin').textContent = poll.message || poll.status;
+        if (poll.status === 'success') {
+          clearInterval(loginPoll);
+          toast('登录成功：' + (poll.alias || ''), 'ok');
+          closeModal('modalLogin');
+          await refreshAll();
+        }
+        if (poll.status === 'error') clearInterval(loginPoll);
+      } catch (error) {
+        clearInterval(loginPoll);
+        toast(error.message, 'err');
+      }
+    }, 2500);
+  } catch (error) {
+    toast(error.message, 'err');
+  }
+});
+
+/* ---------- auth ---------- */
+function askKey(error) {
+  $('txtKey').value = key;
+  openModal('modalKey');
+  if (error) $('txtKey').placeholder = error.message;
+}
+
+$('btnKey').addEventListener('click', () => askKey(null));
+$('btnSaveKey').addEventListener('click', async () => {
+  key = $('txtKey').value.trim();
+  if (key) localStorage.setItem(KEY_STORE, key); else localStorage.removeItem(KEY_STORE);
+  closeModal('modalKey');
+  await refreshAll();
+  if ($('pillConn').classList.contains('ok')) toast('已连接', 'ok');
+});
+
+/* ---------- boot ---------- */
+(function boot() {
+  const params = new URLSearchParams(location.search);
+  const fromQuery = params.get('key') || (location.hash.startsWith('#key=') ? location.hash.slice(5) : '');
+  if (fromQuery) { key = fromQuery; localStorage.setItem(KEY_STORE, key); }
+  if (!key) {
+    for (const candidate of GUESS_KEYS) {
+      const value = localStorage.getItem(candidate);
+      if (value) { key = value; break; }
+    }
+  }
+  $('lblVersion').textContent = 'v…';
+  refreshAll();
+
+  statusTimer = setInterval(() => { if (!document.hidden) loadStatus().catch(() => {}); }, 15000);
+  logTimer = setInterval(() => {
+    if (document.hidden) return;
+    if (!$('view-logs').classList.contains('active') && !$('view-overview').classList.contains('active')) return;
+    if (!$('chkAutoLog').checked) return;
+    loadLogs().catch(() => {});
+  }, 4000);
+})();
+</script>
+</body>
+</html>

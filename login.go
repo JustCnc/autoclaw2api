@@ -279,6 +279,7 @@ func (a *app) startLoginServer() {
 	a.loginMu.Lock()
 	a.loginServer = server
 	a.loginPort = port
+	a.loginBindAddr = bind
 	a.loginMu.Unlock()
 	go func() {
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -288,11 +289,33 @@ func (a *app) startLoginServer() {
 	a.log.info("login", fmt.Sprintf("授权登录页已监听 %s:%d", bind, port))
 }
 
+// ensureLoginServer keeps one listener alive across plugin reconfigure calls.
+// CPA registers and reconfigures the plugin several times per start; tearing the
+// page down each time drops in-flight logins and spams the log.
+func (a *app) ensureLoginServer() {
+	cfg := a.currentConfig()
+	port := cfg.LoginPort
+	if port <= 0 {
+		a.stopLoginServer()
+		return
+	}
+	bind := cfg.loginBind()
+	a.loginMu.Lock()
+	same := a.loginServer != nil && a.loginPort == port && a.loginBindAddr == bind
+	a.loginMu.Unlock()
+	if same {
+		return
+	}
+	a.stopLoginServer()
+	a.startLoginServer()
+}
+
 func (a *app) stopLoginServer() {
 	a.loginMu.Lock()
 	server := a.loginServer
 	a.loginServer = nil
 	a.loginPort = 0
+	a.loginBindAddr = ""
 	a.loginMu.Unlock()
 	if server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

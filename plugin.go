@@ -16,6 +16,7 @@ type app struct {
 	stop    context.CancelFunc
 	done    chan struct{}
 	started bool
+	bootAt  time.Time
 
 	state *stateStore
 	log   *logRing
@@ -40,10 +41,11 @@ type app struct {
 	limitMu sync.Mutex
 	limits  map[string]*tokenBucket
 
-	loginMu     sync.Mutex
-	logins      map[string]*loginSession
-	loginServer *http.Server
-	loginPort   int
+	loginMu       sync.Mutex
+	logins        map[string]*loginSession
+	loginServer   *http.Server
+	loginPort     int
+	loginBindAddr string
 }
 
 var plugin = &app{log: newLogRing(600)}
@@ -70,7 +72,6 @@ func (a *app) configure(raw []byte) error {
 	a.cfg = cfg
 	a.mu.Unlock()
 
-	a.stopLoginServer()
 	a.resetHTTPClient()
 
 	a.mu.Lock()
@@ -112,7 +113,7 @@ func (a *app) configure(raw []byte) error {
 		a.publishAccount(account, false)
 	}
 	a.ensureHostRecords()
-	a.startLoginServer()
+	a.ensureLoginServer()
 	a.startBackground()
 	return nil
 }
@@ -127,6 +128,7 @@ func (a *app) startBackground() {
 	a.stop = cancel
 	a.done = make(chan struct{})
 	a.started = true
+	a.bootAt = time.Now()
 	done := a.done
 	a.mu.Unlock()
 
@@ -245,7 +247,7 @@ func (a *app) registration() registration {
 			ExecutorModelScope:    "both",
 			ExecutorInputFormats:  []string{formatChat},
 			ExecutorOutputFormats: []string{formatChat},
-			ManagementAPI:         false,
+			ManagementAPI:         true,
 		},
 	}
 }
@@ -297,6 +299,14 @@ func (a *app) handleMethod(method string, request []byte) ([]byte, error) {
 		return a.executeStream(request)
 	case methodExecutorCountTokens:
 		return a.countTokens(request)
+	case methodManagementRegister:
+		return okEnvelope(a.managementRegistration())
+	case methodManagementHandle:
+		req, err := decodeRequest[managementRequest](request)
+		if err != nil {
+			return nil, err
+		}
+		return okEnvelope(a.handleManagement(req))
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}

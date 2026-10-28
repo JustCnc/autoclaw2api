@@ -296,3 +296,99 @@ func TestRateLimitKeepsCooldownHint(t *testing.T) {
 		t.Fatalf("cooldown should follow the 20s hint, got %s", cooldown)
 	}
 }
+
+func TestManagementRegistrationAndConsole(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	store, err := newStateStore(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.state = store
+	plugin.mu.Unlock()
+
+	reg := plugin.managementRegistration()
+	if len(reg.Resources) != 1 || reg.Resources[0].Path != "/console" {
+		t.Fatalf("console resource missing: %+v", reg.Resources)
+	}
+	if len(reg.Routes) != len(managementRoutes) {
+		t.Fatalf("routes: got %d want %d", len(reg.Routes), len(managementRoutes))
+	}
+	for _, route := range reg.Routes {
+		if !strings.HasPrefix(route.Path, "/"+providerKey) {
+			t.Fatalf("route without provider prefix: %+v", route)
+		}
+	}
+
+	html := plugin.handleManagement(managementRequest{Method: "GET", Path: "/v0/resource/plugins/autoclaw2api/console"})
+	if html.StatusCode != 200 || !strings.Contains(string(html.Body), "AutoClaw2API") {
+		t.Fatalf("console not served: %d", html.StatusCode)
+	}
+	// Every list must be height-limited so long pools stay usable.
+	if !strings.Contains(string(html.Body), "max-height:400px") {
+		t.Fatal("console is missing the scroll container styles")
+	}
+}
+
+func TestManagementPathNormalization(t *testing.T) {
+	cases := map[string]string{
+		"/v0/management/autoclaw2api/status":         "/status",
+		"/v0/management/autoclaw2api/accounts/reset": "/accounts/reset",
+		"autoclaw2api/accounts":                      "/accounts",
+		"/accounts/export":                           "/accounts/export",
+		"/v0/resource/plugins/autoclaw2api/console":  "/console",
+	}
+	for input, want := range cases {
+		if got := normalizeManagementPath(input); got != want {
+			t.Fatalf("normalizeManagementPath(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
+func TestSplitCredentialJSON(t *testing.T) {
+	single := `{"access_token":"a"}`
+	if got := splitCredentialJSON(single); len(got) != 1 {
+		t.Fatalf("single object: got %d", len(got))
+	}
+	array := `[{"access_token":"a"},{"access_token":"b"}]`
+	if got := splitCredentialJSON(array); len(got) != 2 {
+		t.Fatalf("array: got %d", len(got))
+	}
+	wrapped := `{"accounts":[{"access_token":"a"},{"access_token":"b"},{"access_token":"c"}]}`
+	if got := splitCredentialJSON(wrapped); len(got) != 3 {
+		t.Fatalf("wrapped: got %d", len(got))
+	}
+	jsonl := "{\"access_token\":\"a\"}\n{\"access_token\":\"b\"}"
+	if got := splitCredentialJSON(jsonl); len(got) != 2 {
+		t.Fatalf("jsonl: got %d", len(got))
+	}
+	if got := splitCredentialJSON("not json"); len(got) != 0 {
+		t.Fatalf("garbage should not parse: %d", len(got))
+	}
+}
+
+func TestSanitizedConfigMasksTokens(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.AccessToken = "eyJhbGciOiJIUzI1NiJ9.payload.signature"
+	cfg.RefreshToken = "refresh-token-value-123456"
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.mu.Unlock()
+
+	items := plugin.sanitizedConfig()
+	seen := map[string]string{}
+	for _, item := range items {
+		seen[item.Key] = item.Value
+	}
+	if strings.Contains(seen["access_token"], "payload") || !strings.Contains(seen["access_token"], "••••") {
+		t.Fatalf("access token not masked: %q", seen["access_token"])
+	}
+	if strings.Contains(seen["refresh_token"], "value") {
+		t.Fatalf("refresh token not masked: %q", seen["refresh_token"])
+	}
+	if seen["rate_limit_rpm"] != "30" || seen["rate_limit_burst"] != "20" {
+		t.Fatalf("rate limit defaults missing: %q/%q", seen["rate_limit_rpm"], seen["rate_limit_burst"])
+	}
+}

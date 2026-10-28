@@ -75,9 +75,11 @@ func (s *stateStore) saveDeviceID(id string) error {
 // logRing is a tiny in-memory diagnostic log. The plugin has no management UI,
 // so this exists mainly for tests and for returning a useful message on failure.
 type logRing struct {
-	mu      sync.Mutex
-	entries []string
-	limit   int
+	mu       sync.Mutex
+	entries  []string
+	limit    int
+	lastKey  string
+	lastSeen time.Time
 }
 
 func newLogRing(limit int) *logRing {
@@ -88,9 +90,18 @@ func newLogRing(limit int) *logRing {
 }
 
 func (l *logRing) add(level, scope, message string) {
+	now := time.Now()
+	key := level + ":" + scope + ":" + message
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	line := time.Now().Format("15:04:05") + " " + level + " [" + scope + "] " + message
+	// CPA calls plugin.register and plugin.reconfigure several times on start,
+	// which replays identical lines; keep the ring readable.
+	if key == l.lastKey && now.Sub(l.lastSeen) < 3*time.Second {
+		l.lastSeen = now
+		return
+	}
+	l.lastKey, l.lastSeen = key, now
+	line := now.Format("15:04:05") + " " + level + " [" + scope + "] " + message
 	l.entries = append(l.entries, line)
 	if len(l.entries) > l.limit {
 		l.entries = l.entries[len(l.entries)-l.limit:]

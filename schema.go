@@ -11,7 +11,7 @@ import (
 // the exported C ABI, so the plugin carries no SDK dependency.
 const (
 	providerKey   = "autoclaw2api"
-	pluginVersion = "0.1.0"
+	pluginVersion = "0.1.1"
 	abiVersion    = 1
 	schemaVersion = 6
 )
@@ -36,6 +36,9 @@ const (
 	methodExecutorExecute       = "executor.execute"
 	methodExecutorExecuteStream = "executor.execute_stream"
 	methodExecutorCountTokens   = "executor.count_tokens"
+
+	methodManagementRegister = "management.register"
+	methodManagementHandle   = "management.handle"
 
 	methodHostStreamEmit  = "host.stream.emit"
 	methodHostStreamClose = "host.stream.close"
@@ -117,6 +120,39 @@ type registrationCapability struct {
 	ExecutorInputFormats  []string `json:"executor_input_formats"`
 	ExecutorOutputFormats []string `json:"executor_output_formats"`
 	ManagementAPI         bool     `json:"management_api"`
+}
+
+type managementRegistration struct {
+	Routes    []managementRouteSpec `json:"routes,omitempty"`
+	Resources []resourceRouteSpec   `json:"resources,omitempty"`
+}
+
+type managementRouteSpec struct {
+	Method      string `json:"Method"`
+	Path        string `json:"Path"`
+	Menu        string `json:"Menu,omitempty"`
+	Description string `json:"Description,omitempty"`
+}
+
+type resourceRouteSpec struct {
+	Path        string `json:"Path"`
+	Menu        string `json:"Menu,omitempty"`
+	Description string `json:"Description,omitempty"`
+}
+
+type managementRequest struct {
+	Method         string      `json:"Method"`
+	Path           string      `json:"Path"`
+	Headers        http.Header `json:"Headers"`
+	Query          url.Values  `json:"Query"`
+	Body           []byte      `json:"Body"`
+	HostCallbackID string      `json:"host_callback_id,omitempty"`
+}
+
+type managementResponse struct {
+	StatusCode int         `json:"StatusCode"`
+	Headers    http.Header `json:"Headers"`
+	Body       []byte      `json:"Body"`
 }
 
 type modelInfo struct {
