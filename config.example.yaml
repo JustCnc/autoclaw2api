@@ -1,0 +1,61 @@
+# AutoClaw2API 配置示例
+#
+# 宿主键（enabled / priority）由 CPA 注入；下面是插件自己的配置。
+plugins:
+  enabled: true
+  dir: "plugins"
+  configs:
+    autoclaw2api:
+      enabled: true
+      priority: 1
+      data_dir: "/CLIProxyAPI/plugin-data/autoclaw2api"
+
+      # 上游网关（从 AutoClaw 2.2.2 抓包得到）
+      base_url: "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw"
+      auth_base_url: "https://autoglm-api.autoglm.ai"
+
+      # 方式 A：直接填 token
+      access_token: ""
+      refresh_token: ""
+      device_id: ""
+      credential_alias: "default"
+      credential_priority: 10
+
+      # 方式 B：账号目录（每个 *.json 一个账号，文件名即别名）
+      accounts_dir: "/autoclaw-accounts"
+      import_interval_seconds: 30
+      refresh_margin_seconds: 600
+
+      # 客户端指纹：AutoClaw 升级后同步修改
+      app_id: "100003"
+      app_key: "38d2391985e2369a5fb8227d8e6cd5e5"
+      product: "autoclaw"
+      channel: "official"
+      lang: "zh-CN"
+      client_version: "2.2.2"
+      client_platform: "win"
+      user_agent: "node"
+      enterprise: false
+
+      # 模型目录
+      refresh_seconds: 1800
+      model_allowlist: []
+      model_denylist: []
+
+      # 执行
+      max_attempts: 3
+      cooldown_seconds: 600
+      # 上游实测：单账号约 40 次突发、约 30 次/分钟可持续，超出会触发
+      # 「请求过于频繁」（403 / 810002）并短暂封禁。本地按账号做令牌桶平滑，
+      # 0 表示关闭本地限速，完全交给上游。
+      rate_limit_rpm: 30
+      rate_limit_burst: 20
+      request_timeout_seconds: 600
+      max_tokens_default: 131072
+      reasoning_effort: ""
+      debug_dump: false
+
+      # 授权登录页（Docker 需要映射同端口）
+      login_port: 18634
+      login_bind: "127.0.0.1"  # Docker 里改成 0.0.0.0
+      login_timeout_seconds: 600

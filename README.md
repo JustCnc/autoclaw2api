@@ -1,0 +1,212 @@
+# AutoClaw2API
+
+把本机 AutoClaw 2.x 已登录账号的托管模型网关，接成 CLIProxyAPI（CPA）插件，
+对外提供 OpenAI 兼容的 `/v1/chat/completions` 与 `/v1/models`。
+
+本插件不是照搬 [Agent2API](https://github.com/aimod-cc/Agent2API) 的实现：上游路径、
+请求头、签名、系统提示词门槛和 token 续期方式都是从本机安装的 AutoClaw 2.2.2
+（`resources/app/dist/main.cjs`）里重新解包、抓包核对过的。
+
+## 已实现
+
+- `chat/completions`：流式 / 非流式、工具调用、`reasoning_content`、`usage`
+- `models`：从 `GET /autoclaw-proxy/proxy/autoclaw-model-config` 拉取模型目录并缓存
+- 多账号：配置里的主账号 + `accounts_dir/*.json` + CPA 里导入的 auth JSON
+- 授权登录：插件内置本机登录页，手机号 + 短信验证码登录 AutoClaw
+- token 自动续期：`/userapi/v1/refresh`，必要时回退 `/userapi/v1/agent-refresh`
+- 出站伪装：
+  - `X-Version` / `X-Tm` / `X-Product` / `X-Channel` / `X-Lang`
+  - `X-Auth-Appid` / `X-Auth-TimeStamp` / `X-Auth-Sign = md5(appId&ts&appKey)`
+  - `X-Authorization`（模型网关不用 `Authorization`）
+  - `X-Trace-Id` / `X-Request-Id` / `X-Request-Model` / `X-Client-Type: pc`
+  - `x_trace_id: autoclaw-desktop` / `X-Agent-Id: main` / `X-Session-Id` / `X-Query-Id`
+  - 请求体字段顺序、`stream_options.include_usage`、`store:false`、`max_completion_tokens`
+  - 自动在 system prompt 前注入 AutoClaw 桌面端固定前缀
+    `You are AutoClaw. Answer the user directly and concisely.`
+    （缺这个前缀时上游会返回 `406 Not Acceptable` 空响应）
+
+## 目录
+
+```text
+abi.go / abi_nocgo.go   CLIProxyAPI 插件 C ABI
+schema.go               ABI JSON 结构
+plugin.go               生命周期与 RPC 分发
+config.go               插件配置
+accounts.go             账号池、auth 记录、token 刷新
+catalog.go              模型目录
+identity.go             请求头 / 会话 ID / HTTP 客户端
+payload.go              请求体归一化与 system 前缀注入
+executor.go             chat / stream 执行
+ratelimit.go            按账号的本地令牌桶与上游 403 限流识别
+sse.go                  SSE 解析与聚合
+login.go / loginpage.go 手机号授权登录页
+state.go                私有数据、日志
+tools/export-autoclaw-account.mjs
+                        从本机 AutoClaw 登录态导出账号 JSON
+build.sh                构建 DLL/SO
+```
+
+## 安装
+
+### 方式 A：CPA 插件商店
+
+CPA 的 `plugins.store-sources` 里加上插件源，重启后在「插件商店」搜索
+`AutoClaw2API` 直接安装/更新：
+
+```yaml
+plugins:
+  store-sources:
+    - "https://raw.githubusercontent.com/JustCnc/cpa_plugins/main/registry.json"
+```
+
+### 方式 B：手工放二进制
+
+把 `dist/plugins/<goos>/<goarch>/autoclaw2api.dll`（Windows）或
+`autoclaw2api.so`（Linux）放到 CPA 的 `plugins/<goos>/<goarch>/` 下，然后在
+`config.yaml` 中启用：
+
+```yaml
+plugins:
+  enabled: true
+  dir: "plugins"
+  configs:
+    autoclaw2api:
+      enabled: true
+      priority: 1
+      data_dir: "/CLIProxyAPI/plugin-data/autoclaw2api"
+      # 可以直接填 token，也可以留空，用 accounts_dir / 授权登录
+      # access_token: ""
+      # refresh_token: ""
+      # device_id: ""
+      accounts_dir: "/autoclaw-accounts"
+      login_port: 18634
+      login_bind: "127.0.0.1"   # Docker 里改成 0.0.0.0
+      # 上游单账号约 30 次/分钟、40 次突发；本地按账号做令牌桶平滑
+      rate_limit_rpm: 30        # 0 = 关闭本地限速
+      rate_limit_burst: 20
+```
+
+完整字段见 `config.example.yaml`。
+
+### 方式一：从本机 AutoClaw 导出账号 JSON（推荐，最快）
+
+AutoClaw 的登录态在
+`%APPDATA%\AutoClaw-oversea-official\accounts\<account>\account-credentials.enc`，
+用 Chromium 的 `Local State` 里的 DPAPI 密钥 + AES-256-GCM 加密。Windows 上运行：
+
+```powershell
+node tools/export-autoclaw-account.mjs --out .\accounts\default.json --alias default
+```
+
+然后把 `accounts` 目录挂进容器，或复制到 `accounts_dir`。插件会读取：
+
+```json
+{
+  "type": "autoclaw2api",
+  "alias": "default",
+  "access_token": "eyJ...",
+  "refresh_token": "eyJ...",
+  "device_id": "....",
+  "user_id": "184702"
+}
+```
+
+也可以直接把这份 JSON 放进 CPA 的 auth 目录，插件会通过 `auth.parse` 接收。
+
+### 方式二：CPA 里授权登录
+
+在 CPA 的插件账号页发起登录，插件会启动一个默认只监听 `127.0.0.1:<login_port>` 的
+页面，输入 AutoClaw 账号手机号和短信验证码即可。Docker 部署时把 `login_bind` 改成 `0.0.0.0`，并映射端口：
+
+```yaml
+ports:
+  - "18634:18634"
+```
+
+手机号验证码页只覆盖 AutoClaw 的手机号登录。若账号是邮箱 / Google / Z.ai OAuth
+登录，或返回“需要在企业身份中选择”，请用方式一在已登录的 AutoClaw 客户端导出
+账号 JSON（登录页只处理个人手机号账号的直接登录）。
+
+## 构建
+
+```bash
+# Windows DLL（在 Windows + MinGW 下）
+CC_WINDOWS=x86_64-w64-mingw32-gcc ./build.sh windows/amd64
+
+# Linux SO（在 Linux 或带交叉工具链的环境）
+CC_LINUX=x86_64-linux-gnu-gcc ./build.sh linux/amd64
+```
+
+Docker 里构建 Linux `.so`（本机没有 Docker，未在容器里复测；Windows DLL 已实测）：
+
+```bash
+docker build -f build.Dockerfile -t autoclaw2api-build .
+docker run --rm -v "$PWD/dist:/out" autoclaw2api-build
+```
+
+把 `dist/plugins/linux/amd64/autoclaw2api.so` 放到 CPA 容器的
+`/CLIProxyAPI/plugins/linux/amd64/` 即可。
+
+本机验证时使用的工具链：
+
+- Go 1.27.3 windows/amd64
+- MinGW GCC 16.2.0
+- CPA CLIProxyAPI 8.0.44
+
+## 本机测试结果
+
+用独立的 CPA 8.0.44 实例（端口 8318/8319）加载本插件，使用本机已登录的
+AutoClaw 账号，实际结果：
+
+- `GET /v1/models` 返回 `autoclaw/zai_auto`、`autoclaw/zai_auto-fast`、
+  `autoclaw/zaicoding_glm-5.3`、`autoclaw/zai_glm-5.3-flash`
+- 非流式 `POST /v1/chat/completions` 返回 200，含 `reasoning_content`
+- 流式返回标准 `chat.completion.chunk`，以 `data: [DONE]` 结束
+- 自定义 system prompt 会保留在固定前缀之后
+- `tools` / `tool_choice` 能触发上游 `tool_calls`
+- 手工放入 auth 目录的账号 JSON 能通过 `auth.parse` 被 CPA 识别并成功调用
+- 授权登录页 `/health` 与 `/login?state=...` 正常返回
+- 加压脚本见 `tools/loadtest.mjs`（`node tools/loadtest.mjs burst` / `stream` / `sustain`）
+
+## 上游限流实测（单账号）
+
+在 CPA 8.0.44 + 本插件下用真实账号做了压测（同一出口 IP、同一账号）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 完全空闲后一次性并发 50 | 40 个 200，10 个 403「请求过于频繁」 |
+| 并发 1/2/4/8/12/16/20/24/28 | 全部 200，延迟 1–3s，无降速 |
+| 1 rps（60 次/分钟）持续 2 分钟 | 94 成功 / 25 个 403，出现 2 段 6–19 秒封禁 |
+| 0.75 rps（45 次/分钟）持续 100 秒 | 72 成功 / 3 个 403 |
+| 0.5 rps（30 次/分钟）持续 90 秒 | 45/45 全部成功 |
+| 2 rps 持续 60 秒 | 前 26 秒 48 成功，之后连续 34 秒全部 403 |
+| 12 个并发请求，每个 17.7k prompt tokens | 12/12 成功（不限 token 吞吐） |
+| 流式输出 | 约 50–100 tokens/s（模型解码速度），无额外 TPS 限速 |
+| 单次输出长度 | `max_completion_tokens` 是软限制，模型可能输出更多 |
+
+结论：
+
+- 限制的是**请求次数**（不是 token、不是 TPS）。桶容量约 40，可持续约
+  30 次/分钟；越界后上游返回 403 `{"code":810002,"message":"请求过于频繁，请稍后再试"}`，
+  没有 `Retry-After` 头，惩罚从几秒逐步升级到 30 秒以上，继续打会延长。
+- 上限按账号计算：多账号可以线性叠加（加账号即可提升总吞吐）。
+- 插件默认按账号做令牌桶平滑（`rate_limit_rpm: 30`、`rate_limit_burst: 20`），
+  超出时本地直接返回 429 + `Retry-After`，不再把上游打成惩罚状态。
+- 上游的 403 `810002` 会被归类成可重试的 429（账号冷却 20 秒），多账号时 CPA 会
+  自动切到别的账号，而不是把 403 直接抛给客户端。
+- 超限时 CPA 客户端收到的是标准 `429 rate_limit_exceeded`，按指数退避重试即可；
+  OpenAI SDK / Claude Code / Codex 都会自动重试。
+
+## 注意
+
+- 仅供个人学习 / 自用，请遵守 AutoClaw 的服务条款。不要用于商业转售、批量账号
+  或绕过计费。
+- `access_token` / `refresh_token` / `account-credentials.enc` 都是敏感凭据，不要提交
+  到仓库或发给别人。
+- `login_port` 只绑定配置的地址（默认 `127.0.0.1`）；不要把它暴露到公网。
+- 插件和 AutoClaw 客户端共用同一个 `refresh_token`。插件自动续期后，AutoClaw
+  客户端的本地登录态可能失效；重新打开客户端登录，或重新运行导出脚本即可。
+  如果不想影响客户端，把 `refresh_margin_seconds` 设得很大，或在 token 过期前
+  重新导出。
+- 上游客户端升级后，如果 `X-Version`、`app_key` 或系统提示词前缀变化，需要同步
+  修改 `config.go` 中的默认值。

@@ -1,0 +1,14 @@
+dist/
+test-cpa/
+test-cpa2/
+test-data/
+test-data2/
+test-accounts/
+*.dll
+*.so
+*.h
+plugin.log
+*.log
+.DS_Store
+.pi/
+*.exe
