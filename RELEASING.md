@@ -279,6 +279,44 @@ curl -sS --noproxy '*' \
 限流行为可以顺手回归一下（`rate_limit_rpm: 30`、`rate_limit_burst: 20`）：
 并发 40 应该得到约 20 个 200 + 20 个本地 429，紧接着的单发仍然 200。
 
+## 7.5 远端（Docker）看不到新版本
+
+现象：远端 CPA 的插件商店里 `autoclaw2api` 可装版本还停在旧版本，没有「更新」。
+
+先在远端容器里直接读一次源，分清是 registry 旧还是 CPA 缓存旧：
+
+```bash
+docker exec <container> wget -qO- https://raw.githubusercontent.com/JustCnc/cpa_plugins/main/registry.json | grep -A3 autoclaw2api
+```
+
+- 输出还是旧 `version`：容器拿到的是缓存的 registry。raw 的 `Cache-Control` 只有 5 分钟，
+  说明链路上有代理 / 镜像在长时间缓存。处理：重启容器和上游代理；或换成 CDN 源
+  （`https://cdn.jsdelivr.net/gh/JustCnc/cpa_plugins@main/registry.json`）；
+  或给容器配 `requests.proxy-url` 让它直连。
+- 输出已经是新 `version`、商店仍显示旧值：CPA 侧缓存，重启容器；仍未刷新就手动装
+  release 里的 zip。
+
+本地对照实验（2026-10-28）：把插件降回 `0.1.0`、registry 已是 `0.1.1`、GitHub API 处于限流状态，
+商店依然返回 `version=0.1.1 / installed_version=0.1.0 / update_available=true`。
+所以只要 registry 是新的，GitHub API 限流不会挡住更新提示。
+
+未认证的 GitHub API 只有 60 次/小时，被限流时日志是：
+
+```text
+pluginstore: failed to fetch latest release plugin_id=autoclaw2api error=GitHub API rate limited; retry after ...
+```
+
+这种时候版本会回退到 registry，但下载 release 资产仍可能失败。给商店配一个 GitHub token 可以把
+配额提到 5000 次/小时：
+
+```yaml
+plugins:
+  store-auth:
+    - match: "https://api.github.com/repos/"
+      apply-to: ["registry", "artifact"]
+      type: "github-token"
+      token-env: "CLIPROXY_PLUGIN_GITHUB_TOKEN"
+```
 ## 8. 失败处理与回滚
 
 - **workflow 报 tag 与 pluginVersion 不一致**：不要改 workflow 绕过；把 `schema.go` 改成
