@@ -305,26 +305,53 @@ type oauthLoginResponse struct {
 }
 
 func (a *app) postIdentity(ctx context.Context, path string, payload any) ([]byte, error) {
+	raw, status, ctype, err := a.doIdentity(ctx, path, payload)
+	if err != nil {
+		return nil, err
+	}
+	if json.Valid(raw) {
+		return raw, nil
+	}
+	// An edge WAF or a local proxy occasionally answers with an HTML page or an
+	// empty body; one retry on a fresh connection usually returns the real JSON.
+	a.resetHTTPClient()
+	raw, status, ctype, err = a.doIdentity(ctx, path, payload)
+	if err != nil {
+		return nil, err
+	}
+	if json.Valid(raw) {
+		return raw, nil
+	}
+	snippet := strings.Join(strings.Fields(string(raw)), " ")
+	if snippet == "" {
+		snippet = "（空响应）"
+	}
+	a.log.warn("login", fmt.Sprintf("身份网关返回非 JSON（HTTP %d, %s）：%s", status, ctype, truncateRunes(snippet, 200)))
+	return nil, fmt.Errorf("AutoClaw 返回了非 JSON 响应（HTTP %d, %s）：%s", status, ctype, truncateRunes(snippet, 160))
+}
+
+func (a *app) doIdentity(ctx context.Context, path string, payload any) ([]byte, int, string, error) {
 	cfg := a.currentConfig()
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.AuthBaseURL+path, strings.NewReader(string(body)))
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	req.Header = a.loginHeaders(cfg)
 	resp, err := a.httpClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("连接 AutoClaw 失败：%w", err)
+		return nil, 0, "", fmt.Errorf("连接 AutoClaw 失败：%w", err)
 	}
 	defer resp.Body.Close()
 	raw, err := readLimited(resp.Body, 1<<20)
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("AutoClaw 返回 HTTP %d：%s", resp.StatusCode, truncateRunes(string(raw), 200))
+		return nil, resp.StatusCode, resp.Header.Get("Content-Type"),
+			fmt.Errorf("AutoClaw 返回 HTTP %d：%s", resp.StatusCode, truncateRunes(string(raw), 200))
 	}
-	return raw, nil
+	return raw, resp.StatusCode, resp.Header.Get("Content-Type"), nil
 }
 
 func (a *app) loginCaptchaConfig(ctx context.Context) (captchaConfig, error) {
@@ -399,7 +426,7 @@ func (a *app) exchangeOAuthCode(ctx context.Context, provider, code, state, navi
 	}
 	var envelope oauthLoginResponse
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return nil, fmt.Errorf("授权响应不是 JSON")
+		return nil, fmt.Errorf("授权响应格式不对：%s", truncateRunes(strings.Join(strings.Fields(string(raw)), " "), 160))
 	}
 	if envelope.Code != 0 {
 		return nil, fmt.Errorf("%s（code=%d）", firstNonEmpty(envelope.Msg, "授权失败"), envelope.Code)

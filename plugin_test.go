@@ -512,3 +512,56 @@ func TestPastedCallbackCompletesLogin(t *testing.T) {
 		t.Fatal("callback without code must fail")
 	}
 }
+
+func TestExchangeRetriesNonJSONResponse(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html><body>waf challenge</body></html>"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"user_id":7,"access_token":"` + testJWT() + `"}}`))
+	}))
+	defer server.Close()
+
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.AuthBaseURL = server.URL
+	store, err := newStateStore(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.state = store
+	plugin.mu.Unlock()
+	plugin.resetHTTPClient()
+
+	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai")
+	if err != nil {
+		t.Fatalf("retry should recover a JSON answer, got %v", err)
+	}
+	if account.UserID != "7" || calls != 2 {
+		t.Fatalf("unexpected: user=%q calls=%d", account.UserID, calls)
+	}
+
+	// Both attempts HTML: the error must carry the status and a body snippet.
+	calls = 0
+	htmlOnly := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><body>blocked</body></html>"))
+	}))
+	defer htmlOnly.Close()
+	cfg.AuthBaseURL = htmlOnly.URL
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.mu.Unlock()
+	plugin.resetHTTPClient()
+	if _, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai"); err == nil ||
+		!strings.Contains(err.Error(), "text/html") || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("error should expose the html body, got %v", err)
+	}
+}
