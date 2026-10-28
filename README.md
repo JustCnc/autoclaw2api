@@ -127,6 +127,19 @@ ports:
 登录，或返回“需要在企业身份中选择”，请用方式一在已登录的 AutoClaw 客户端导出
 账号 JSON（登录页只处理个人手机号账号的直接登录）。
 
+## 预编译产物
+
+每个 Release 都带现成的二进制，直接下载对应平台即可（也支持从 CPA 插件商店安装）：
+
+```text
+autoclaw2api_<version>_linux_amd64.zip    → plugins/linux/amd64/autoclaw2api.so
+autoclaw2api_<version>_linux_arm64.zip    → plugins/linux/arm64/autoclaw2api.so
+autoclaw2api_<version>_windows_amd64.zip  → plugins/windows/amd64/autoclaw2api.dll
+checksums.txt                             → sha256 校验
+```
+
+<https://github.com/JustCnc/autoclaw2api/releases>
+
 ## 构建
 
 ```bash
@@ -196,6 +209,11 @@ AutoClaw 账号，实际结果：
   自动切到别的账号，而不是把 403 直接抛给客户端。
 - 超限时 CPA 客户端收到的是标准 `429 rate_limit_exceeded`，按指数退避重试即可；
   OpenAI SDK / Claude Code / Codex 都会自动重试。
+
+## 发版
+
+版本号唯一来源是 `schema.go` 的 `pluginVersion`，tag 必须是 `v<pluginVersion>`。
+完整步骤见 [`RELEASING.md`](RELEASING.md)。
 
 ## 注意
 
