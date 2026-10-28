@@ -565,3 +565,47 @@ func TestExchangeRetriesNonJSONResponse(t *testing.T) {
 		t.Fatalf("error should expose the html body, got %v", err)
 	}
 }
+
+// The gateway answers zai-oauth-login with string ids and extra fields; the
+// response used to fail decoding because user_id was typed as json.Number.
+func TestExchangeAcceptsStringUserID(t *testing.T) {
+	body := `{"code":0,"msg":"SUCCESS","time":1793161640175,"trace":"d7a4",` +
+		`"data":{"sub_id":"ab1b2566-c6ed-4d74-83c1-aeddcb8df856","user_id":"a88",` +
+		`"user_name":"tester","user_phone":"13800000000","access_token":"` + testJWT() + `",` +
+		`"refresh_token":"refresh-9","enterprise_id":0,"account_type":"personal"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.AuthBaseURL = server.URL
+	store, err := newStateStore(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.state = store
+	plugin.mu.Unlock()
+	plugin.resetHTTPClient()
+
+	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "c1", "s1", "http://localhost:18432/auth/callback-zai")
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if account.UserID != "a88" || account.RefreshToken != "refresh-9" || account.Enterprise {
+		t.Fatalf("unexpected account: %+v", account)
+	}
+
+	// Numeric ids still work.
+	numeric := strings.Replace(body, `"user_id":"a88"`, `"user_id":184702`, 1)
+	var envelope oauthLoginResponse
+	if err := json.Unmarshal([]byte(numeric), &envelope); err != nil {
+		t.Fatalf("numeric decode: %v", err)
+	}
+	if envelope.Data == nil || string(envelope.Data.UserID) != "184702" {
+		t.Fatalf("numeric user id: %+v", envelope.Data)
+	}
+}

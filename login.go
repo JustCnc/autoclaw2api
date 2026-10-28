@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -291,16 +292,52 @@ type oauthURLResponse struct {
 	} `json:"data"`
 }
 
+// flexText accepts both "123" and 123: the gateway is inconsistent about which
+// fields it sends as strings (user_id comes back as a string in newer builds).
+type flexText string
+
+func (f *flexText) UnmarshalJSON(raw []byte) error {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		*f = ""
+		return nil
+	}
+	if raw[0] == '"' {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return err
+		}
+		*f = flexText(text)
+		return nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		*f = ""
+		return nil
+	}
+	*f = flexText(number.String())
+	return nil
+}
+
+// enterpriseFlag reports whether an enterprise_id value means "enterprise
+// account"; the gateway sends "" or 0 for personal accounts.
+func enterpriseFlag(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	return raw != "" && raw != "0" && raw != "null"
+}
+
 type oauthLoginResponse struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data *struct {
-		UserID       json.Number `json:"user_id"`
-		UserName     string      `json:"user_name"`
-		UserPhone    string      `json:"user_phone"`
-		AccessToken  string      `json:"access_token"`
-		RefreshToken string      `json:"refresh_token"`
-		EnterpriseID string      `json:"enterprise_id"`
+		SubID        flexText `json:"sub_id"`
+		UserID       flexText `json:"user_id"`
+		UserName     flexText `json:"user_name"`
+		UserPhone    flexText `json:"user_phone"`
+		AccessToken  flexText `json:"access_token"`
+		RefreshToken flexText `json:"refresh_token"`
+		EnterpriseID flexText `json:"enterprise_id"`
+		AccountType  flexText `json:"account_type"`
 	} `json:"data"`
 }
 
@@ -434,17 +471,17 @@ func (a *app) exchangeOAuthCode(ctx context.Context, provider, code, state, navi
 	if envelope.Data == nil {
 		return nil, fmt.Errorf("授权响应没有数据")
 	}
-	access := normalizeToken(envelope.Data.AccessToken)
-	refresh := normalizeToken(envelope.Data.RefreshToken)
+	access := normalizeToken(string(envelope.Data.AccessToken))
+	refresh := normalizeToken(string(envelope.Data.RefreshToken))
 	if access == "" {
 		return nil, fmt.Errorf("授权响应没有 access_token")
 	}
 	account := &credential{
 		AccessToken:  access,
 		RefreshToken: refresh,
-		UserID:       envelope.Data.UserID.String(),
+		UserID:       string(envelope.Data.UserID),
 		Source:       "login",
-		Enterprise:   strings.TrimSpace(envelope.Data.EnterpriseID) != "",
+		Enterprise:   enterpriseFlag(string(envelope.Data.EnterpriseID)),
 		UpdatedAt:    time.Now().UnixMilli(),
 	}
 	account.normalize()
