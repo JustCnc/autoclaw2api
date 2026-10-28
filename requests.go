@@ -235,6 +235,7 @@ func (a *app) recordRequest(entry requestEntry) {
 		prompt:     entry.PromptTokens,
 		completion: entry.CompletionTokens,
 		at:         entry.At,
+		totalMs:    entry.TotalMs,
 	})
 }
 
@@ -269,6 +270,7 @@ type billWatch struct {
 	prompt     int64
 	completion int64
 	at         int64
+	totalMs    int64
 }
 
 func (a *app) watchBill(item billWatch) {
@@ -277,14 +279,17 @@ func (a *app) watchBill(item billWatch) {
 	}
 	a.billMu.Lock()
 	if a.billQueue == nil {
-		a.billQueue = make(chan billWatch, 256)
-		go a.billWorker()
+		a.billQueue = make(chan billWatch, 512)
+		for worker := 0; worker < 3; worker++ {
+			go a.billWorker()
+		}
 	}
 	queue := a.billQueue
 	a.billMu.Unlock()
 	select {
 	case queue <- item:
 	default:
+		a.log.warn("billing", "积分回填队列已满，跳过一条请求的积分匹配")
 	}
 }
 
@@ -321,15 +326,14 @@ func (a *app) resolveBill(item billWatch) {
 // once, so a burst of identical prompts cannot bill the same row twice.
 func (a *app) claimBill(item billWatch, entries []creditLedger) (int64, bool) {
 	a.billMu.Lock()
+	defer a.billMu.Unlock()
 	if a.claimedBills == nil {
 		a.claimedBills = map[string]bool{}
 	}
-	claimed := a.claimedBills
-	a.billMu.Unlock()
-
 	start := time.UnixMilli(item.at)
+	end := start.Add(time.Duration(item.totalMs)*time.Millisecond + 5*time.Minute)
 	for _, entry := range entries {
-		if entry.ID == "" || claimed[entry.ID] {
+		if entry.ID == "" || a.claimedBills[entry.ID] {
 			continue
 		}
 		if entry.TokensIn != item.prompt || entry.TokensOut != item.completion {
@@ -339,15 +343,16 @@ func (a *app) claimBill(item billWatch, entries []creditLedger) (int64, bool) {
 			continue
 		}
 		occurred, err := time.Parse(time.RFC3339, entry.At)
-		if err == nil && (occurred.Before(start.Add(-90*time.Second)) || occurred.After(start.Add(5*time.Minute))) {
+		if err != nil {
 			continue
 		}
-		a.billMu.Lock()
-		claimed[entry.ID] = true
-		if len(claimed) > 4000 {
+		if occurred.Before(start.Add(-90*time.Second)) || occurred.After(end) {
+			continue
+		}
+		a.claimedBills[entry.ID] = true
+		if len(a.claimedBills) > 20000 {
 			a.claimedBills = map[string]bool{entry.ID: true}
 		}
-		a.billMu.Unlock()
 		return entry.Amount, true
 	}
 	return 0, false
@@ -365,5 +370,7 @@ func sameModelName(left, right string) bool {
 		return value
 	}
 	left, right = normalize(left), normalize(right)
-	return left == "" || right == "" || left == right
+	// Both sides must name the same model: guessing when one is empty would
+	// attach another account's (or another model's) spend to this row.
+	return left != "" && left == right
 }

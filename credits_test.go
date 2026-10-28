@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseTokenUsage(t *testing.T) {
@@ -131,5 +132,95 @@ func TestClaimBillMatchesTokensAndTime(t *testing.T) {
 	}
 	if points, ok = a.claimBill(item, entries); ok {
 		t.Fatalf("a row must only be claimed once, got %d", points)
+	}
+}
+
+func TestManagementPathsForCreditsRoutes(t *testing.T) {
+	cases := map[string]string{
+		"/v0/management/autoclaw2api/credits":         "/credits",
+		"/v0/management/autoclaw2api/credits/ledgers": "/credits/ledgers",
+		"/v0/management/autoclaw2api/credits/refresh": "/credits/refresh",
+		"/v0/management/autoclaw2api/requests":        "/requests",
+		"/v0/management/autoclaw2api/login/status":    "/login/status",
+		"/v0/management/autoclaw2api/status":          "/status",
+	}
+	for input, want := range cases {
+		if got := normalizeManagementPath(input); got != want {
+			t.Fatalf("%s: want %s, got %s", input, want, got)
+		}
+	}
+}
+
+func TestCreditsCacheTTLAndFailureBackoff(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 2 {
+			_, _ = w.Write([]byte(`{"code":410000,"msg":"Please log in to continue."}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"total_balance":100,"wallets":[]}}`))
+	}))
+	defer server.Close()
+
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.AuthBaseURL = server.URL
+	store, err := newStateStore(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.state = store
+	plugin.credits = nil
+	plugin.mu.Unlock()
+	plugin.resetHTTPClient()
+	account := &credential{ID: "acc-ttl", AccessToken: "tok"}
+
+	first := plugin.creditsFor(context.Background(), account, false)
+	if first.Total != 100 || first.Error != "" {
+		t.Fatalf("first fetch: %+v", first)
+	}
+	// Cached: no new upstream call.
+	if again := plugin.creditsFor(context.Background(), account, false); again.Total != 100 || calls != 1 {
+		t.Fatalf("cache hit expected, calls=%d snapshot=%+v", calls, again)
+	}
+	// refresh bypasses the cache and the failure keeps the last good total.
+	failed := plugin.creditsFor(context.Background(), account, true)
+	if failed.Error == "" || failed.Total != 100 {
+		t.Fatalf("failure should keep the cached total: %+v", failed)
+	}
+	if calls != 2 {
+		t.Fatalf("refresh should hit upstream, calls=%d", calls)
+	}
+	// A failed entry is retried after ~10s instead of being trusted for the TTL.
+	plugin.creditMu.Lock()
+	entry := plugin.credits["acc-ttl"]
+	entry.at = entry.at.Add(-11 * time.Second)
+	plugin.credits["acc-ttl"] = entry
+	plugin.creditMu.Unlock()
+	plugin.creditsFor(context.Background(), account, false)
+	if calls != 3 {
+		t.Fatalf("failed cache should expire fast, calls=%d", calls)
+	}
+}
+
+func TestClaimBillRejectsWrongModelOrWindow(t *testing.T) {
+	a := &app{}
+	item := billWatch{accountID: "acc", seq: 1, model: "zai_glm-5.3-flash", prompt: 10, completion: 5, at: 1793163150000, totalMs: 1000}
+
+	if _, ok := a.claimBill(item, []creditLedger{{ID: "x", At: "2026-10-28T12:52:31.076+08:00", Model: "glm-5.3", Amount: -1, TokensIn: 10, TokensOut: 5}}); ok {
+		t.Fatal("a different model must not be claimed")
+	}
+	if _, ok := a.claimBill(item, []creditLedger{{ID: "y", At: "2026-10-28T20:52:31.076+08:00", Model: "glm-5.3-flash", Amount: -1, TokensIn: 10, TokensOut: 5}}); ok {
+		t.Fatal("a row outside the window must not be claimed")
+	}
+	if _, ok := a.claimBill(item, []creditLedger{{ID: "z", At: "not-a-time", Model: "glm-5.3-flash", Amount: -1, TokensIn: 10, TokensOut: 5}}); ok {
+		t.Fatal("an unparseable timestamp must not be claimed")
+	}
+	points, ok := a.claimBill(item, []creditLedger{{ID: "ok", At: "2026-10-28T12:52:31.076+08:00", Model: "glm-5.3-flash", Amount: -7, TokensIn: 10, TokensOut: 5}})
+	if !ok || points != -7 {
+		t.Fatalf("matching row should be claimed: %d ok=%v", points, ok)
 	}
 }

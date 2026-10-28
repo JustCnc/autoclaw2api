@@ -162,6 +162,15 @@ func (a *app) executeStream(raw []byte) ([]byte, error) {
 		reader.Close()
 		cancel()
 		if errRead != nil {
+			a.recordRequest(requestEntry{
+				At:        start.UnixMilli(),
+				AccountID: accountID,
+				Model:     withModelPrefix(model),
+				Stream:    true,
+				Status:    http.StatusBadGateway,
+				TotalMs:   elapsedMs(time.Since(start)),
+				Error:     "读取上游响应失败：" + errRead.Error(),
+			})
 			return upstreamError("读取上游响应失败："+errRead.Error(), http.StatusBadGateway, true), nil
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {

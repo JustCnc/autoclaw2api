@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -59,6 +60,7 @@ type creditLedger struct {
 type creditCacheEntry struct {
 	snapshot creditSnapshot
 	at       time.Time
+	failed   bool
 }
 
 // creditHeaders is the identity block with the plain bearer token the asset
@@ -232,8 +234,9 @@ func parseTokenUsage(raw string) (in, out, cache int64) {
 	return in, out, cache
 }
 
-// creditsFor returns a cached balance, refreshing it when stale.
-func (a *app) creditsFor(account *credential, refresh bool) creditSnapshot {
+// creditsFor returns a cached balance, refreshing it when stale. Failures are
+// cached briefly so a broken account does not get hammered on every page load.
+func (a *app) creditsFor(ctx context.Context, account *credential, refresh bool) creditSnapshot {
 	if account == nil {
 		return creditSnapshot{Error: "账号不存在"}
 	}
@@ -244,14 +247,22 @@ func (a *app) creditsFor(account *credential, refresh bool) creditSnapshot {
 	a.creditMu.Lock()
 	cached, ok := a.credits[account.ID]
 	a.creditMu.Unlock()
-	if ok && !refresh && time.Since(cached.at) < ttl {
-		return cached.snapshot
+	if ok && !refresh {
+		limit := ttl
+		if cached.failed {
+			limit = 10 * time.Second
+		}
+		if time.Since(cached.at) < limit {
+			return cached.snapshot
+		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	if fresh, errFresh := a.ensureAccountFresh(ctx, account); errFresh == nil && fresh != nil {
+		account = fresh
+	}
 	snapshot, err := a.fetchCredits(ctx, account)
-	cancel()
-	if err != nil {
+	failed := err != nil
+	if failed {
 		snapshot.Error = err.Error()
 		if ok {
 			// Keep the last good numbers visible instead of blanking the panel.
@@ -267,7 +278,7 @@ func (a *app) creditsFor(account *credential, refresh bool) creditSnapshot {
 	if a.credits == nil {
 		a.credits = map[string]creditCacheEntry{}
 	}
-	a.credits[account.ID] = creditCacheEntry{snapshot: snapshot, at: time.Now()}
+	a.credits[account.ID] = creditCacheEntry{snapshot: snapshot, at: time.Now(), failed: failed}
 	a.creditMu.Unlock()
 	return snapshot
 }
@@ -277,10 +288,11 @@ func (a *app) creditsFor(account *credential, refresh bool) creditSnapshot {
 func (a *app) creditsPayload(refresh bool) map[string]any {
 	accounts := a.poolSnapshot()
 	views := make([]map[string]any, 0, len(accounts))
+	snapshots := a.creditsForAccounts(accounts, refresh)
 	var total int64
 	okCount := 0
-	for _, account := range accounts {
-		snapshot := a.creditsFor(account, refresh)
+	for index, account := range accounts {
+		snapshot := snapshots[index]
 		if snapshot.Error == "" {
 			total += snapshot.Total
 			okCount++
@@ -302,15 +314,46 @@ func (a *app) creditsPayload(refresh bool) map[string]any {
 	}
 }
 
-// creditsSummary is the compact form used by /status.
+// creditsForAccounts resolves every balance concurrently under one deadline, so
+// a single slow account cannot stall the console.
+func (a *app) creditsForAccounts(accounts []*credential, refresh bool) []creditSnapshot {
+	out := make([]creditSnapshot, len(accounts))
+	if len(accounts) == 0 {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for index, account := range accounts {
+		wg.Add(1)
+		go func(index int, account *credential) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[index] = a.creditsFor(ctx, account, refresh)
+		}(index, account)
+	}
+	wg.Wait()
+	return out
+}
+
+// creditsSummary is the compact form used by /status. It walks the pool, so a
+// removed account stops contributing instead of lingering in the total.
 func (a *app) creditsSummary() map[string]any {
+	accounts := a.poolSnapshot()
 	a.creditMu.Lock()
 	defer a.creditMu.Unlock()
 	var total int64
 	var fetchedAt int64
 	reporting := 0
-	for _, cached := range a.credits {
-		if cached.snapshot.Error != "" {
+	for _, account := range accounts {
+		cached, ok := a.credits[account.ID]
+		if !ok {
+			continue
+		}
+		// A failed refresh keeps the previous total, which still counts.
+		if cached.snapshot.Error != "" && cached.snapshot.Total == 0 {
 			continue
 		}
 		total += cached.snapshot.Total

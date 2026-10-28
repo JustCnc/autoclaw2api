@@ -592,8 +592,11 @@ function showView(name) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
   if (name === 'logs') loadLogs();
-  if (name === 'requests') loadRequests();
-  if (name === 'credits') { loadCredits(false); loadLedger($('selLedgerAccount').value); }
+  if (name === 'requests') loadRequests().catch((e) => toast(e.message, 'err'));
+  if (name === 'credits') {
+    loadCredits(false).catch((e) => toast(e.message, 'err'));
+    loadLedger($('selLedgerAccount').value).catch((e) => toast(e.message, 'err'));
+  }
 }
 
 document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => showView(tab.dataset.view)));
