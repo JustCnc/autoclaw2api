@@ -41,6 +41,15 @@ type app struct {
 	limitMu sync.Mutex
 	limits  map[string]*tokenBucket
 
+	requests *requestLog
+
+	creditMu sync.Mutex
+	credits  map[string]creditCacheEntry
+
+	billMu       sync.Mutex
+	billQueue    chan billWatch
+	claimedBills map[string]bool
+
 	loginMu     sync.Mutex
 	logins      map[string]*loginSession
 	loginCb     *http.Server
@@ -48,7 +57,7 @@ type app struct {
 	loginCbPort int
 }
 
-var plugin = &app{log: newLogRing(600)}
+var plugin = &app{log: newLogRing(600), requests: newRequestLog(300)}
 
 func (a *app) currentConfig() Config {
 	a.mu.Lock()
@@ -84,6 +93,12 @@ func (a *app) configure(raw []byte) error {
 		a.state = store
 	}
 	a.mu.Unlock()
+
+	if a.requests == nil {
+		a.requests = newRequestLog(cfg.RequestLogLimit)
+	} else {
+		a.requests.resize(cfg.RequestLogLimit)
+	}
 
 	a.credMu.Lock()
 	loaded := len(a.accounts) > 0

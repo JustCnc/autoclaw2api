@@ -55,6 +55,10 @@ plugins:
       reasoning_effort: ""
       debug_dump: false
 
+      # 观测：控制台「请求」页保留多少条记录；积分余额缓存秒数（只读查询，不消耗积分）
+      request_log_limit: 300
+      credits_cache_seconds: 60
+
       # 授权登录页（Docker 需要映射同端口）
       # OAuth 授权回调端口：0 = 自动从 18432/19654/19723/53699/1876x 里挑空闲端口
       # Docker 里要把选中的端口映射出来，浏览器回调才能回到容器

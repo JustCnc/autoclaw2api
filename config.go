@@ -55,6 +55,11 @@ type Config struct {
 	ReasoningEffort       string `yaml:"reasoning_effort"`
 	DebugDump             bool   `yaml:"debug_dump"`
 
+	// Observability: the request ring feeds the 请求 tab, the credit cache
+	// throttles balance lookups against the identity gateway.
+	RequestLogLimit     int `yaml:"request_log_limit"`
+	CreditsCacheSeconds int `yaml:"credits_cache_seconds"`
+
 	// Authorization login. The gateway hands the OAuth code back to a loopback
 	// URL, so the plugin binds one of the ports the desktop client uses.
 	LoginCallbackPort   int `yaml:"login_callback_port"`
@@ -104,6 +109,8 @@ func defaultConfig() Config {
 		RateLimitBurst:        20,
 		RequestTimeoutSeconds: 600,
 		MaxTokensDefault:      131072,
+		RequestLogLimit:       300,
+		CreditsCacheSeconds:   60,
 		LoginCallbackPort:     0,
 		LoginTimeoutSeconds:   600,
 	}
@@ -210,6 +217,21 @@ func (c *Config) normalize() error {
 	}
 	if c.CooldownSeconds > 7200 {
 		c.CooldownSeconds = 7200
+	}
+	if c.RequestLogLimit < 0 {
+		c.RequestLogLimit = 0
+	}
+	if c.RequestLogLimit == 0 {
+		c.RequestLogLimit = 300
+	}
+	if c.RequestLogLimit > 5000 {
+		c.RequestLogLimit = 5000
+	}
+	if c.CreditsCacheSeconds <= 0 {
+		c.CreditsCacheSeconds = 60
+	}
+	if c.CreditsCacheSeconds > 3600 {
+		c.CreditsCacheSeconds = 3600
 	}
 	if c.RequestTimeoutSeconds <= 0 {
 		c.RequestTimeoutSeconds = 600
@@ -356,6 +378,8 @@ func pluginConfigFields() []configField {
 		{Name: "max_tokens_default", Type: "integer", Default: 131072, Description: "客户端未给 max_tokens 时补的默认值，0 表示不补"},
 		{Name: "reasoning_effort", Type: "enum", Default: "", EnumValues: []string{"", "low", "medium", "high"}, Description: "客户端未指定思考强度时的默认值"},
 		{Name: "debug_dump", Type: "boolean", Default: false, Description: "日志记录出站头部与正文（排障用）"},
+		{Name: "request_log_limit", Type: "integer", Default: 300, Description: "控制台「请求」页保留多少条请求记录（0 表示用默认 300）"},
+		{Name: "credits_cache_seconds", Type: "integer", Default: 60, Description: "积分余额缓存时长，避免频繁查询上游"},
 		{Name: "login_callback_port", Type: "integer", Default: 0, Description: "OAuth 回调端口（0 = 自动从 18432/19654/19723/53699 里挑空闲端口）"},
 		{Name: "login_timeout_seconds", Type: "integer", Default: 600, Description: "授权登录有效期"},
 	}

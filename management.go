@@ -53,6 +53,10 @@ var managementRoutes = []managementRoute{
 	{"GET", "/models"},
 	{"POST", "/catalog/refresh"},
 	{"GET", "/logs"},
+	{"GET", "/requests"},
+	{"GET", "/credits"},
+	{"GET", "/credits/ledgers"},
+	{"POST", "/credits/refresh"},
 	{"GET", "/config"},
 	{"POST", "/test"},
 	{"GET", "/login/status"},
@@ -160,6 +164,43 @@ func (a *app) handleManagement(req managementRequest) managementResponse {
 			entries = entries[len(entries)-limit:]
 		}
 		return jsonResponse(map[string]any{"entries": entries})
+	case method == "GET" && path == "/requests":
+		limit := 100
+		if raw := req.Query.Get("limit"); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 500 {
+				limit = parsed
+			}
+		}
+		return jsonResponse(map[string]any{
+			"summary": a.requests.summary(),
+			"entries": a.requests.tail(limit),
+		})
+	case method == "GET" && path == "/credits":
+		refresh := strings.TrimSpace(req.Query.Get("refresh")) == "1"
+		return jsonResponse(a.creditsPayload(refresh))
+	case method == "POST" && path == "/credits/refresh":
+		payload := a.creditsPayload(true)
+		summary, _ := payload["summary"].(map[string]any)
+		total := int64(0)
+		if summary != nil {
+			if value, ok := summary["total"].(int64); ok {
+				total = value
+			}
+		}
+		return jsonResponse(map[string]any{
+			"ok":       true,
+			"message":  fmt.Sprintf("积分余额已刷新：合计 %d 积分", total),
+			"summary":  payload["summary"],
+			"accounts": payload["accounts"],
+		})
+	case method == "GET" && path == "/credits/ledgers":
+		limit := 30
+		if raw := req.Query.Get("limit"); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
+				limit = parsed
+			}
+		}
+		return jsonResponse(a.ledgerPayload(req.Query.Get("account"), limit))
 	case method == "GET" && path == "/config":
 		return jsonResponse(map[string]any{"config": a.sanitizedConfig()})
 	case method == "POST" && path == "/test":
@@ -376,6 +417,8 @@ func (a *app) statusPayload() map[string]any {
 		"started_at":      a.startedAt(),
 		"server_time":     now.UTC().Format(time.RFC3339),
 		"log_entries":     len(a.log.snapshot()),
+		"credits":         a.creditsSummary(),
+		"requests":        a.requests.summary(),
 		"catalog_refresh": cfg.RefreshSeconds,
 	}
 }
@@ -742,4 +785,37 @@ func removeFile(path string) error {
 		return os.ErrInvalid
 	}
 	return os.Remove(path)
+}
+
+// ledgerPayload returns the points ledger of one account, defaulting to the
+// first usable one so the console has something to show without a selection.
+func (a *app) ledgerPayload(accountID string, limit int) map[string]any {
+	accounts := a.poolSnapshot()
+	var target *credential
+	if accountID != "" {
+		for _, account := range accounts {
+			if account.ID == accountID || account.Alias == accountID {
+				target = account
+				break
+			}
+		}
+	}
+	if target == nil && len(accounts) > 0 {
+		target = accounts[0]
+	}
+	if target == nil {
+		return map[string]any{"ok": false, "message": "账号池是空的", "entries": []creditLedger{}}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	entries, err := a.fetchLedgers(ctx, target, limit)
+	if err != nil {
+		return map[string]any{"ok": false, "message": err.Error(), "account": target.Alias, "entries": []creditLedger{}}
+	}
+	return map[string]any{
+		"ok":         true,
+		"account":    target.Alias,
+		"account_id": target.ID,
+		"entries":    entries,
+	}
 }

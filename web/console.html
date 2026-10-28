@@ -63,7 +63,7 @@
   .view { display:none; }
   .view.active { display:block; }
 
-  .grid-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:16px; }
+  .grid-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin-bottom:16px; }
   @media (max-width:1000px) { .grid-stats { grid-template-columns:repeat(2,1fr); } }
   @media (max-width:600px) { .grid-stats { grid-template-columns:1fr; } }
   .card { background:var(--bg-panel); border:1px solid var(--border); border-radius:11px; box-shadow:var(--shadow); }
@@ -88,6 +88,22 @@
   .scroll.logs { max-height:440px; }
   .scroll.kv { max-height:420px; }
   .scroll.preview { max-height:200px; }
+  .scroll.short { max-height:300px; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { display:inline-flex; align-items:baseline; gap:6px; padding:6px 11px; border-radius:9px; background:var(--bg-subtle); border:1px solid var(--border); font-size:12px; color:var(--text-muted); }
+  .chip b { font-size:14px; color:var(--text); font-weight:650; }
+  .chip.ok b { color:var(--ok); }
+  .chip.bad b { color:var(--bad); }
+  .chip.primary b { color:var(--primary); }
+  .num { font-family:var(--mono); font-size:12px; }
+  .num.spent { color:var(--bad); }
+  .num.earned { color:var(--ok); }
+  .credit-grid { display:flex; flex-wrap:wrap; gap:12px; }
+  .credit-card { flex:1 1 250px; max-width:340px; border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:#fff; }
+  .credit-card.muted { opacity:.7; }
+  .credit-total { font-size:22px; font-weight:700; letter-spacing:-.01em; }
+  .credit-total small { font-size:12px; font-weight:500; color:var(--text-subtle); }
+  .credit-wallet { display:flex; justify-content:space-between; font-size:11.5px; color:var(--text-muted); margin-top:4px; }
 
   table { width:100%; border-collapse:collapse; font-size:13px; }
   thead th { position:sticky; top:0; z-index:1; background:var(--bg-subtle); text-align:left; padding:9px 14px; font-size:11px; letter-spacing:.04em; text-transform:uppercase; color:var(--text-muted); border-bottom:1px solid var(--border); white-space:nowrap; }
@@ -157,6 +173,8 @@
     <button class="tab active" data-view="overview">概览</button>
     <button class="tab" data-view="accounts">账号 <span class="badge" id="badgeAccounts">0</span></button>
     <button class="tab" data-view="models">模型 <span class="badge" id="badgeModels">0</span></button>
+    <button class="tab" data-view="requests">请求 <span class="badge" id="badgeRequests">0</span></button>
+    <button class="tab" data-view="credits">积分 <span class="badge" id="badgeCredits">—</span></button>
     <button class="tab" data-view="logs">日志</button>
     <button class="tab" data-view="settings">设置</button>
   </div>
@@ -185,6 +203,11 @@
         <div class="stat-label">运行时长</div>
         <div class="stat-value" id="statUptime">—</div>
         <div class="stat-foot" id="statStarted">启动于 —</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-label">积分余额</div>
+        <div class="stat-value" id="statCredits">—</div>
+        <div class="stat-foot" id="statCreditsFoot">点开「积分」查看明细</div>
       </div>
     </div>
 
@@ -279,6 +302,88 @@
             <tr><th>模型 ID</th><th>名称</th><th>上下文</th><th>最大输出</th><th>推理</th><th>输入</th><th>对外暴露</th></tr>
           </thead>
           <tbody id="modelRows"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 请求 -->
+  <section class="view" id="view-requests">
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head">
+        <div>
+          <div class="card-title">请求概况</div>
+          <div class="card-desc" id="reqMeta">最近的转发记录，重启后清空</div>
+        </div>
+        <div class="toolbar">
+          <label class="switch"><input type="checkbox" id="chkAutoReq" /> 自动刷新</label>
+          <button class="btn sm" id="btnRequests">刷新</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="chips" id="reqSummary"><span class="chip">暂无数据</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">请求日志</div>
+          <div class="card-desc">积分由上游账单回填，通常比请求晚几秒</div>
+        </div>
+        <div class="toolbar">
+          <select id="selReqLimit" style="width:auto">
+            <option value="50">最近 50 条</option>
+            <option value="100" selected>最近 100 条</option>
+            <option value="300">最近 300 条</option>
+          </select>
+        </div>
+      </div>
+      <div class="scroll table" style="max-height:460px">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th><th>账号</th><th>模型</th><th>状态</th><th>首字</th><th>耗时</th><th>Token</th><th>缓存</th><th>积分</th><th>错误</th>
+            </tr>
+          </thead>
+          <tbody id="requestRows"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 积分 -->
+  <section class="view" id="view-credits">
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head">
+        <div>
+          <div class="card-title">积分余额</div>
+          <div class="card-desc" id="creditMeta">来自 AutoClaw 资产接口，只读查询不消耗积分</div>
+        </div>
+        <div class="toolbar">
+          <button class="btn sm primary" id="btnCreditRefresh">刷新余额</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="credit-grid" id="creditCards"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">积分流水</div>
+          <div class="card-desc">上游账单，负数表示消耗</div>
+        </div>
+        <div class="toolbar">
+          <select id="selLedgerAccount" style="width:auto"></select>
+          <button class="btn sm" id="btnLedger">刷新流水</button>
+        </div>
+      </div>
+      <div class="scroll table" style="max-height:420px">
+        <table>
+          <thead>
+            <tr><th>时间</th><th>模型</th><th>类型</th><th>积分</th><th>输入</th><th>输出</th><th>缓存</th><th>说明</th></tr>
+          </thead>
+          <tbody id="ledgerRows"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -487,6 +592,8 @@ function showView(name) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
   if (name === 'logs') loadLogs();
+  if (name === 'requests') loadRequests();
+  if (name === 'credits') { loadCredits(false); loadLedger($('selLedgerAccount').value); }
 }
 
 document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => showView(tab.dataset.view)));
@@ -521,6 +628,15 @@ function renderStatus(s) {
     $('statUptime').textContent = '—';
     $('statStarted').textContent = '启动于 —';
   }
+
+  const credits = s.credits || {};
+  const reqSummary = s.requests || {};
+  $('statCredits').textContent = credits.reporting ? fmt(credits.total) : '—';
+  $('statCreditsFoot').textContent = credits.reporting
+    ? (credits.reporting + ' 个账号有余额 · ' + (credits.fetched_at ? new Date(credits.fetched_at).toLocaleTimeString() : '—'))
+    : '点开「积分」查询余额';
+  $('badgeCredits').textContent = credits.reporting ? fmt(credits.total) : '—';
+  $('badgeRequests').textContent = fmt(reqSummary.total || 0);
 
   const upstream = s.upstream || {};
   const conf = s.config || {};
@@ -630,6 +746,149 @@ function renderLogs(entries, target) {
   target.scrollTop = target.scrollHeight;
 }
 
+function fmtMs(ms) {
+  if (ms == null || ms === 0) return '—';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
+}
+
+function fmtTime(ms) {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  if (isNaN(d)) return '—';
+  return d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+function fmtPoints(points) {
+  if (points == null) return '<span class="num">—</span>';
+  const cls = points < 0 ? 'num spent' : (points > 0 ? 'num earned' : 'num');
+  const text = points > 0 ? '+' + points : String(points);
+  return '<span class="' + cls + '">' + esc(text) + '</span>';
+}
+
+function statusPillFor(status) {
+  if (status >= 200 && status < 300) return '<span class="pill ok"><span class="dot"></span> ' + status + '</span>';
+  if (status >= 400 && status < 500) return '<span class="pill warn"><span class="dot"></span> ' + status + '</span>';
+  if (status >= 500) return '<span class="pill bad"><span class="dot"></span> ' + status + '</span>';
+  return '<span class="pill neutral">' + esc(status || '—') + '</span>';
+}
+
+function renderRequests(data) {
+  const entries = data.entries || [];
+  const s = data.summary || {};
+  const chips = [
+    ['总请求', fmt(s.total || 0), ''],
+    ['成功', fmt((s.total || 0) - (s.failures || 0)), 'ok'],
+    ['失败', fmt(s.failures || 0), (s.failures ? 'bad' : '')],
+    ['平均首字', fmtMs(s.avg_ttft_ms), ''],
+    ['平均耗时', fmtMs(s.avg_total_ms), ''],
+    ['输入/输出', fmt(s.prompt_tokens || 0) + ' / ' + fmt(s.completion_tokens || 0), ''],
+    ['缓存命中', s.cache_rate ? (s.cache_rate * 100).toFixed(1) + '%' : '—', ''],
+    ['消耗积分', s.points == null ? '—' : String(s.points), 'primary'],
+  ];
+  $('reqSummary').innerHTML = chips.map(function (chip) {
+    return '<span class="chip ' + chip[2] + '">' + esc(chip[0]) + ' <b>' + esc(chip[1]) + '</b></span>';
+  }).join('');
+  $('badgeRequests').textContent = fmt(s.total || 0);
+  $('reqMeta').textContent = '最近的转发记录 · 保留 ' + (s.total || 0) + ' 条';
+
+  if (!entries.length) {
+    $('requestRows').innerHTML = '<tr><td colspan="10" class="empty">还没有请求，去 CPA 里发一条对话试试</td></tr>';
+    return;
+  }
+  $('requestRows').innerHTML = entries.map(function (e) {
+    const tokens = (e.prompt_tokens || e.completion_tokens)
+      ? fmt(e.prompt_tokens) + ' / ' + fmt(e.completion_tokens)
+      : '—';
+    const cache = e.cache_rate ? (e.cache_rate * 100).toFixed(0) + '%' : '—';
+    const upstream = e.upstream_model && e.upstream_model !== e.model
+      ? '<div class="cell-sub mono">' + esc(e.upstream_model) + '</div>' : '';
+    const stream = e.stream ? '<span class="pill neutral">流式</span>' : '<span class="pill neutral">一次性</span>';
+    return '<tr>' +
+      '<td class="num">' + esc(fmtTime(e.at)) + '</td>' +
+      '<td>' + esc(e.account || '—') + '</td>' +
+      '<td class="mono" style="font-size:11.5px">' + esc(e.model || '—') + upstream + '</td>' +
+      '<td>' + statusPillFor(e.status) + ' ' + stream + '</td>' +
+      '<td class="num">' + esc(fmtMs(e.ttft_ms)) + '</td>' +
+      '<td class="num">' + esc(fmtMs(e.total_ms)) + '</td>' +
+      '<td class="num">' + esc(tokens) + '</td>' +
+      '<td class="num">' + esc(cache) + '</td>' +
+      '<td>' + fmtPoints(e.points) + '</td>' +
+      '<td>' + (e.error ? '<span class="cell-sub">' + esc(String(e.error).slice(0, 90)) + '</span>' : '—') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function walletRows(wallets) {
+  const shown = (wallets || []).filter(function (w) { return w.display || w.balance; });
+  if (!shown.length) return '<div class="credit-wallet"><span>暂无可见钱包</span></div>';
+  return shown.map(function (w) {
+    return '<div class="credit-wallet"><span>' + esc(w.name || w.type) + '</span><span class="num">' + esc(fmt(w.balance)) + '</span></div>';
+  }).join('');
+}
+
+function renderCredits(data) {
+  const list = data.accounts || [];
+  const summary = data.summary || {};
+  $('creditMeta').textContent = '合计 ' + fmt(summary.total || 0) + ' 积分 · ' + fmt(summary.reporting || 0) + '/' + fmt(summary.accounts || 0) + ' 个账号已上报';
+  $('badgeCredits').textContent = fmt(summary.total || 0);
+  $('statCredits').textContent = summary.reporting ? fmt(summary.total || 0) : '—';
+  $('statCreditsFoot').textContent = summary.reporting
+    ? (fmt(summary.reporting) + ' 个账号有余额 · ' + new Date().toLocaleTimeString())
+    : '点开「积分」查询余额';
+  if (!list.length) {
+    $('creditCards').innerHTML = '<div class="empty">账号池是空的</div>';
+    return;
+  }
+  $('creditCards').innerHTML = list.map(function (a) {
+    const when = a.fetched_at ? new Date(a.fetched_at).toLocaleTimeString() : '—';
+    const err = a.error ? '<div class="credit-wallet" style="color:var(--bad)">' + esc(a.error.slice(0, 80)) + '</div>' : '';
+    return '<div class="credit-card' + (a.disabled ? ' muted' : '') + '">' +
+      '<div class="toolbar" style="justify-content:space-between;align-items:baseline">' +
+        '<strong>' + esc(a.alias || a.id) + '</strong>' +
+        (a.disabled ? '<span class="pill neutral">已停用</span>' : '') +
+      '</div>' +
+      '<div class="credit-total">' + fmt(a.total) + ' <small>积分</small></div>' +
+      walletRows(a.wallets) + err +
+      '<div class="credit-wallet" style="color:var(--text-subtle)"><span>更新于 ' + esc(when) + '</span><span class="mono">' + esc(a.user_id || '') + '</span></div>' +
+      '</div>';
+  }).join('');
+
+  const sel = $('selLedgerAccount');
+  const current = sel.value;
+  sel.innerHTML = list.map(function (a) {
+    return '<option value="' + esc(a.id) + '">' + esc(a.alias || a.id) + '</option>';
+  }).join('');
+  if (current && list.some(function (a) { return a.id === current; })) sel.value = current;
+}
+
+function renderLedger(data) {
+  const entries = data.entries || [];
+  if (data.message && !data.ok) {
+    $('ledgerRows').innerHTML = '<tr><td colspan="8" class="empty">' + esc(data.message) + '</td></tr>';
+    return;
+  }
+  if (!entries.length) {
+    $('ledgerRows').innerHTML = '<tr><td colspan="8" class="empty">没有流水记录</td></tr>';
+    return;
+  }
+  $('ledgerRows').innerHTML = entries.map(function (e) {
+    const when = e.at ? new Date(e.at).toLocaleString() : '—';
+    const kind = e.mutation === 'debit' ? '<span class="pill warn">扣费</span>' : '<span class="pill ok">入账</span>';
+    return '<tr>' +
+      '<td class="num">' + esc(when) + '</td>' +
+      '<td class="mono" style="font-size:11.5px">' + esc(e.model || '—') + '</td>' +
+      '<td>' + kind + '</td>' +
+      '<td>' + fmtPoints(e.amount) + '</td>' +
+      '<td class="num">' + esc(e.tokens_in || '—') + '</td>' +
+      '<td class="num">' + esc(e.tokens_out || '—') + '</td>' +
+      '<td class="num">' + esc(e.cache_tokens || '—') + '</td>' +
+      '<td><span class="cell-sub">' + esc((e.description || '').slice(0, 70)) + '</span></td>' +
+      '</tr>';
+  }).join('');
+}
+
+
 /* ---------- loaders ---------- */
 async function loadStatus() {
   const s = await api('/status');
@@ -654,6 +913,24 @@ async function loadLogs() {
   renderLogs((data.entries || []).slice(-40), $('logPreview'));
 }
 
+async function loadRequests() {
+  const limit = $('selReqLimit').value || '100';
+  const data = await api('/requests?limit=' + encodeURIComponent(limit));
+  renderRequests(data);
+}
+
+async function loadCredits(refresh) {
+  const data = await api('/credits' + (refresh ? '?refresh=1' : ''));
+  renderCredits(data);
+  return data;
+}
+
+async function loadLedger(accountID) {
+  const query = accountID ? '?account=' + encodeURIComponent(accountID) : '';
+  const data = await api('/credits/ledgers' + query);
+  renderLedger(data);
+}
+
 async function loadConfig() {
   const data = await api('/config');
   renderKv($('kvConfig'), data.config || []);
@@ -665,6 +942,8 @@ async function refreshAll() {
     await loadAccounts();
     await loadModels();
     await loadLogs();
+    await loadRequests();
+    await loadCredits(false);
     await loadConfig();
   } catch (error) {
     setConn(false, error.message);
@@ -693,6 +972,22 @@ $('btnRefreshAll').addEventListener('click', () => post('/accounts/refresh', {},
 $('btnRefreshAll2').addEventListener('click', () => post('/accounts/refresh', {}, '刷新 token'));
 $('btnResetAll').addEventListener('click', () => post('/accounts/reset', {}, '重置冷却'));
 $('btnLogs').addEventListener('click', loadLogs);
+$('btnRequests').addEventListener('click', () => loadRequests().catch((e) => toast(e.message, 'err')));
+$('selReqLimit').addEventListener('change', () => loadRequests().catch((e) => toast(e.message, 'err')));
+$('btnLedger').addEventListener('click', () => loadLedger($('selLedgerAccount').value).catch((e) => toast(e.message, 'err')));
+$('selLedgerAccount').addEventListener('change', () => loadLedger($('selLedgerAccount').value).catch((e) => toast(e.message, 'err')));
+$('btnCreditRefresh').addEventListener('click', async () => {
+  try {
+    const result = await api('/credits/refresh', { method: 'POST', body: '{}' });
+    toast(result.message || '余额已刷新', result.ok === false ? 'err' : 'ok');
+    await loadCredits(false);
+    await loadLedger($('selLedgerAccount').value);
+    await loadStatus();
+  } catch (error) {
+    toast(error.message, 'err');
+    if (error.auth) askKey(error);
+  }
+});
 
 $('accountRows').addEventListener('click', async (event) => {
   const btn = event.target.closest('button[data-act]');
@@ -976,6 +1271,12 @@ $('btnSaveKey').addEventListener('click', async () => {
   refreshAll();
 
   statusTimer = setInterval(() => { if (!document.hidden) loadStatus().catch(() => {}); }, 15000);
+  setInterval(() => {
+    if (document.hidden) return;
+    if (!$('view-requests').classList.contains('active')) return;
+    if (!$('chkAutoReq').checked) return;
+    loadRequests().catch(() => {});
+  }, 5000);
   logTimer = setInterval(() => {
     if (document.hidden) return;
     if (!$('view-logs').classList.contains('active') && !$('view-overview').classList.contains('active')) return;

@@ -54,23 +54,59 @@ func (a *app) execute(raw []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.requestTimeout())
 	defer cancel()
 	start := time.Now()
-	headers, payload, _, errCall := a.callUpstream(ctx, cfg, model, body, req.Headers, a.preferredAccount(req.executorRequest))
+	headers, payload, accountID, errCall := a.callUpstream(ctx, cfg, model, body, req.Headers, a.preferredAccount(req.executorRequest))
 	if errCall != nil {
 		failure := asFailure(errCall)
 		a.log.error("upstream", fmt.Sprintf("model=%s HTTP=%d %s", model, failure.Status, failure.Message))
+		a.recordRequest(requestEntry{
+			At:        start.UnixMilli(),
+			AccountID: accountID,
+			Model:     withModelPrefix(model),
+			Status:    failure.Status,
+			TotalMs:   elapsedMs(time.Since(start)),
+			Error:     failure.Message,
+		})
 		return upstreamError(failure.Message, failure.Status, failure.Retryable), nil
 	}
 	if !isEventStream(headers) && isErrorEnvelope(payload) {
 		failure := classifyFailure(http.StatusBadGateway, payload)
+		a.recordRequest(requestEntry{
+			At:        start.UnixMilli(),
+			AccountID: accountID,
+			Model:     withModelPrefix(model),
+			Status:    failure.Status,
+			TotalMs:   elapsedMs(time.Since(start)),
+			Error:     failure.Message,
+		})
 		return upstreamError(failure.Message, failure.Status, failure.Retryable), nil
 	}
-	if isEventStream(headers) {
+	streamed := isEventStream(headers)
+	if streamed {
 		aggregated, failure := aggregateChatStream(payload)
 		if failure != nil {
+			a.recordRequest(requestEntry{
+				At:        start.UnixMilli(),
+				AccountID: accountID,
+				Model:     withModelPrefix(model),
+				Status:    failure.Status,
+				TotalMs:   elapsedMs(time.Since(start)),
+				Error:     failure.Message,
+			})
 			return upstreamError(failure.Message, failure.Status, failure.Retryable), nil
 		}
 		payload = aggregated
 	}
+	entry := requestEntry{
+		At:            start.UnixMilli(),
+		AccountID:     accountID,
+		Model:         withModelPrefix(model),
+		UpstreamModel: modelNameOf(payload),
+		Stream:        streamed,
+		Status:        http.StatusOK,
+		TotalMs:       elapsedMs(time.Since(start)),
+	}
+	entry.applyUsage(parseUsage(payload))
+	a.recordRequest(entry)
 	a.log.info("upstream", fmt.Sprintf("model=%s %dms bytes=%d", model, time.Since(start).Milliseconds(), len(payload)))
 	return okEnvelope(executorResponse{
 		Payload: payload,
@@ -105,11 +141,20 @@ func (a *app) executeStream(raw []byte) ([]byte, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	start := time.Now()
-	resp, reader, _, errOpen := a.openStream(ctx, cfg, model, body, req.Headers, a.preferredAccount(req.executorRequest))
+	resp, reader, accountID, errOpen := a.openStream(ctx, cfg, model, body, req.Headers, a.preferredAccount(req.executorRequest))
 	if errOpen != nil {
 		cancel()
 		failure := asFailure(errOpen)
 		a.log.error("stream", fmt.Sprintf("model=%s HTTP=%d %s", model, failure.Status, failure.Message))
+		a.recordRequest(requestEntry{
+			At:        start.UnixMilli(),
+			AccountID: accountID,
+			Model:     withModelPrefix(model),
+			Stream:    true,
+			Status:    failure.Status,
+			TotalMs:   elapsedMs(time.Since(start)),
+			Error:     failure.Message,
+		})
 		return upstreamError(failure.Message, failure.Status, failure.Retryable), nil
 	}
 	if !isEventStream(resp.Header) {
@@ -121,12 +166,42 @@ func (a *app) executeStream(raw []byte) ([]byte, error) {
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			failure := classifyFailure(resp.StatusCode, payload)
+			a.recordRequest(requestEntry{
+				At:        start.UnixMilli(),
+				AccountID: accountID,
+				Model:     withModelPrefix(model),
+				Stream:    true,
+				Status:    failure.Status,
+				TotalMs:   elapsedMs(time.Since(start)),
+				Error:     failure.Message,
+			})
 			return upstreamError(failure.Message, failure.Status, failure.Retryable), nil
 		}
 		chunks := completionToChunks(payload)
 		if len(chunks) == 0 {
+			a.recordRequest(requestEntry{
+				At:        start.UnixMilli(),
+				AccountID: accountID,
+				Model:     withModelPrefix(model),
+				Stream:    true,
+				Status:    http.StatusBadGateway,
+				TotalMs:   elapsedMs(time.Since(start)),
+				Error:     "上游返回了无法解析的响应体",
+			})
 			return upstreamError("上游返回了无法解析的响应体", http.StatusBadGateway, true), nil
 		}
+		entry := requestEntry{
+			At:            start.UnixMilli(),
+			AccountID:     accountID,
+			Model:         withModelPrefix(model),
+			UpstreamModel: modelNameOf(payload),
+			Stream:        true,
+			Status:        http.StatusOK,
+			TotalMs:       elapsedMs(time.Since(start)),
+		}
+		entry.TTFTms = entry.TotalMs
+		entry.applyUsage(parseUsage(payload))
+		a.recordRequest(entry)
 		go func() {
 			for _, chunk := range chunks {
 				if errEmit := a.emit(streamID, chunk); errEmit != nil {
@@ -146,13 +221,28 @@ func (a *app) executeStream(raw []byte) ([]byte, error) {
 		defer cancel()
 		defer idle.Stop()
 		defer reader.Close()
-		errPump := a.pumpStream(streamID, model, reader, func() { idle.Reset(cfg.requestTimeout()) })
+		stats, errPump := a.pumpStream(streamID, model, reader, func() { idle.Reset(cfg.requestTimeout()) }, start)
+		entry := requestEntry{
+			At:            start.UnixMilli(),
+			AccountID:     accountID,
+			Model:         withModelPrefix(model),
+			UpstreamModel: stats.Model,
+			Stream:        true,
+			Status:        http.StatusOK,
+			TTFTms:        stats.TTFTms,
+			TotalMs:       elapsedMs(time.Since(start)),
+		}
+		entry.applyUsage(stats.Usage)
 		if errPump != nil {
 			failure := asFailure(errPump)
+			entry.Status = failure.Status
+			entry.Error = failure.Message
+			a.recordRequest(entry)
 			a.log.error("stream", fmt.Sprintf("model=%s %dms %s", model, time.Since(start).Milliseconds(), failure.Message))
 			a.closeStream(streamID, failure.Message)
 			return
 		}
+		a.recordRequest(entry)
 		a.log.info("stream", fmt.Sprintf("model=%s %dms", model, time.Since(start).Milliseconds()))
 		a.closeStream(streamID, "")
 	}()
@@ -380,13 +470,21 @@ func (a *app) send(ctx context.Context, cfg Config, model string, body []byte, a
 	return a.httpClient().Do(req)
 }
 
-func (a *app) pumpStream(streamID, model string, body io.ReadCloser, touch func()) error {
+// streamStats is what a finished stream contributes to the request log.
+type streamStats struct {
+	TTFTms int64
+	Model  string
+	Usage  *usageInfo
+}
+
+func (a *app) pumpStream(streamID, model string, body io.ReadCloser, touch func(), start time.Time) (streamStats, error) {
 	reader := newSSEReader(body)
 	sawFinish := false
 	sawToolCalls := false
 	sawContent := false
 	var lastID, lastModel string
 	var lastCreated int64
+	stats := streamStats{}
 
 	finish := func(reason, errMsg string) {
 		if chunk := finishChunk(lastID, lastModel, lastCreated, model, reason, errMsg); chunk != nil {
@@ -404,7 +502,7 @@ func (a *app) pumpStream(streamID, model string, body io.ReadCloser, touch func(
 				}
 				finish(reason, "")
 			}
-			return nil
+			return stats, nil
 		}
 		if err != nil {
 			if sawContent {
@@ -413,18 +511,24 @@ func (a *app) pumpStream(streamID, model string, body io.ReadCloser, touch func(
 					reason = "tool_calls"
 				}
 				finish(reason, "上游流中断："+err.Error())
-				return nil
+				return stats, nil
 			}
-			return err
+			return stats, err
 		}
 		if len(event) == 0 {
 			continue
 		}
 		if isErrorEnvelope(event) {
-			return classifyFailure(http.StatusBadGateway, event)
+			return stats, classifyFailure(http.StatusBadGateway, event)
 		}
 		if touch != nil {
 			touch()
+		}
+		if stats.TTFTms == 0 && len(event) > 0 && strings.Contains(string(event), "chat.completion.chunk") {
+			stats.TTFTms = elapsedMs(time.Since(start))
+		}
+		if usage := parseUsage(event); usage != nil {
+			stats.Usage = usage
 		}
 		var probe struct {
 			ID      string `json:"id"`
@@ -445,6 +549,7 @@ func (a *app) pumpStream(streamID, model string, body io.ReadCloser, touch func(
 			}
 			if probe.Model != "" {
 				lastModel = probe.Model
+				stats.Model = probe.Model
 			}
 			if probe.Created != 0 {
 				lastCreated = probe.Created
@@ -463,7 +568,7 @@ func (a *app) pumpStream(streamID, model string, body io.ReadCloser, touch func(
 			}
 		}
 		if err := a.emit(streamID, event); err != nil {
-			return err
+			return stats, err
 		}
 	}
 }

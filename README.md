@@ -14,7 +14,12 @@
 - 多账号：配置里的主账号 + `accounts_dir/*.json` + CPA 里导入的 auth JSON
 - 授权登录：控制台内嵌阿里云验证码，换取 AutoClaw 官方 OAuth 授权链接（Z.ai / Google），
   loopback 回调自动收 token；手机号验证码登录也在控制台里
-- 插件页面：CPA 里的「AutoClaw2API」控制台（账号池 / 模型 / 日志 / 配置 / 测试对话）
+- 插件页面：CPA 里的「AutoClaw2API」控制台（账号池 / 模型 / 请求 / 积分 / 日志 / 配置 / 测试对话）
+- 积分余额：读 AutoClaw 资产接口 `/agent-assetmgr/api/v2/wallets`，按账号展示总积分与钱包拆分
+  （奖励 / 每日 / 订阅 / 加油包 / 其他），带缓存，只读查询不消耗积分
+- 请求日志：每次转发的耗时、首字延迟、token、缓存命中、状态码、错误，环形缓冲；
+  调用结束后回查 `/agent-assetmgr/api/v1/ledgers_std`，按模型 + token 数 + 时间窗匹配账单，
+  把这一条实际消耗的积分回填到对应行
 - token 自动续期：`/userapi/v1/refresh`，必要时回退 `/userapi/v1/agent-refresh`
 - 出站伪装：
   - `X-Version` / `X-Tm` / `X-Product` / `X-Channel` / `X-Lang`
@@ -183,14 +188,34 @@ checksums.txt                             → sha256 校验
 
 页面只有一个 HTML + 原生 JS，不需要额外静态资源，也不占端口。包含：
 
-- **概览**：账号池可用数、模型数量、本地限速、运行时长、上游指纹摘要、最近日志
+- **概览**：账号池可用数、模型数量、本地限速、运行时长、积分余额、上游指纹摘要、最近日志
 - **账号**：列表（固定高度滚动）、刷新 token、重置冷却、禁用/启用、移除、导入、导出
 - **模型**：目录列表（固定高度滚动）、上下文/最大输出、是否对外暴露、手动刷新目录
+- **请求**：最近转发记录（固定高度滚动）+ 概况（总数/成功/失败/平均首字/平均耗时/token/缓存/积分），
+  可自动刷新，积分由上游账单回填
+- **积分**：每个账号的余额卡片（总积分 + 钱包拆分）与积分流水表（时间/模型/扣费/输入输出/说明），
+  可手动刷新余额
 - **日志**：环形缓冲（固定高度滚动），可关自动刷新
 - **设置**：只读生效配置，token 类字段打码
 
-所有列表容器都限制了最大高度（表格 400px、日志 440px、配置 420px、概览日志 200px）
+所有列表容器都限制了最大高度（表格 400px、请求 460px、流水 420px、日志 440px、配置 420px、概览日志 200px）
 并独立滚动，账号或日志再多也不会把页面撑长。
+
+页面用到的接口（前缀 `/v0/management/autoclaw2api`）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/status` | 账号池、目录、限速、积分合计、请求概况 |
+| GET | `/accounts` | 账号列表 |
+| GET | `/models` | 模型目录 |
+| GET | `/requests?limit=100` | 请求日志 + 汇总 |
+| GET | `/credits[?refresh=1]` | 每个账号的积分余额 |
+| POST | `/credits/refresh` | 强制刷新全部余额 |
+| GET | `/credits/ledgers?account=&limit=` | 积分流水 |
+| GET | `/logs?limit=300` | 插件日志 |
+| GET | `/config` | 只读生效配置 |
+| POST | `/catalog/refresh` / `/accounts/refresh` / `/accounts/reset` | 目录 / token / 冷却 |
+| POST | `/login/*` | 授权登录、验证码、回调 |
 
 页面通过 `<管理密钥>` 调用 `/v0/management/autoclaw2api/*`：在右上角「管理密钥」里填
 CPA 的 `management.secret-key`，只存本机 `localStorage`；也可以用
