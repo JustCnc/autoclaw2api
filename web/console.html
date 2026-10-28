@@ -374,17 +374,47 @@
 
 <!-- 新增账号 -->
 <div class="modal-backdrop" id="modalLogin">
-  <div class="modal" style="max-width:520px">
-    <div class="modal-head"><div class="modal-title">新增账号（手机号）</div><button class="btn sm ghost" data-close="modalLogin">关闭</button></div>
+  <div class="modal" style="max-width:640px">
+    <div class="modal-head"><div class="modal-title">新增账号</div><button class="btn sm ghost" data-close="modalLogin">关闭</button></div>
     <div class="modal-body">
-      <p class="muted" id="loginState">点击「打开授权页」，在插件本机页面完成手机号验证。</p>
-      <div style="height:12px"></div>
-      <div class="scroll" style="max-height:180px"><pre class="logs" id="preLogin">—</pre></div>
+      <div class="toolbar" style="margin-bottom:14px">
+        <button class="btn sm primary" id="tabOAuth">授权链接</button>
+        <button class="btn sm" id="tabPhone">手机号验证码</button>
+      </div>
+      <div id="paneOAuth">
+        <label class="field">登录方式</label>
+        <select id="selProvider">
+          <option value="zai">Z.ai（chat.z.ai）</option>
+          <option value="google">Google</option>
+        </select>
+        <div class="hint">AutoClaw 网关要求先过阿里云人机验证：点一下验证码，通过后再生成链接。</div>
+        <div style="height:10px"></div>
+        <div class="toolbar"><span id="capSlot"></span><span class="muted" id="lblCaptcha">未验证</span></div>
+        <div style="height:12px"></div>
+        <div class="toolbar">
+          <button class="btn sm primary" id="btnOAuthStart" disabled>生成授权链接</button>
+          <button class="btn sm" id="btnOAuthOpen" disabled>重新打开</button>
+        </div>
+        <div style="height:12px"></div>
+        <div class="scroll" style="max-height:200px"><pre class="logs" id="preOAuth">—</pre></div>
+      </div>
+      <div id="panePhone" style="display:none">
+        <label class="field">手机号</label>
+        <div class="toolbar">
+          <input type="text" id="txtPhone" placeholder="+8613800000000 或 13800000000" style="flex:1;min-width:200px" />
+          <button class="btn sm" id="btnSendCode">发送验证码</button>
+        </div>
+        <div style="height:12px"></div>
+        <label class="field">验证码</label>
+        <div class="toolbar">
+          <input type="text" id="txtCode" placeholder="6 位数字" style="flex:1;min-width:160px" />
+          <button class="btn sm primary" id="btnPhoneLogin">登录</button>
+        </div>
+        <div style="height:12px"></div>
+        <div class="scroll" style="max-height:160px"><pre class="logs" id="prePhone">—</pre></div>
+      </div>
     </div>
-    <div class="modal-foot">
-      <button class="btn sm" data-close="modalLogin">关闭</button>
-      <button class="btn sm primary" id="btnDoLogin">打开授权页</button>
-    </div>
+    <div class="modal-foot"><button class="btn sm" data-close="modalLogin">关闭</button></div>
   </div>
 </div>
 
@@ -489,7 +519,7 @@ function renderStatus(s) {
     ['client_version', upstream.client_version],
     ['product / channel', (upstream.product || '') + ' / ' + (upstream.channel || '')],
     ['data_dir', conf.data_dir],
-    ['授权登录页', (conf.login_bind || '127.0.0.1') + ':' + (conf.login_port || '')],
+    ['OAuth 回调端口', conf.login_callback_port ? String(conf.login_callback_port) : '自动'],
     ['模型前缀', conf.model_prefix],
     ['服务时间', s.server_time],
   ].map(([k, v]) => '<div class="kv-row"><span class="kv-key">' + esc(k) + '</span><span class="kv-val">' + esc(v || '—') + '</span></div>').join('');
@@ -714,31 +744,162 @@ $('btnDoTest').addEventListener('click', async () => {
   }
 });
 
-$('btnAddAccount').addEventListener('click', () => { $('preLogin').textContent = '—'; openModal('modalLogin'); });
-$('btnDoLogin').addEventListener('click', async () => {
-  try {
-    const start = await api('/login/start', { method: 'POST', body: '{}' });
-    if (!start.ok) { toast(start.message, 'err'); return; }
-    $('preLogin').textContent = '授权页：' + start.url + '\n等待浏览器完成手机号验证…';
-    window.open(start.url, '_blank');
-    clearInterval(loginPoll);
-    loginPoll = setInterval(async () => {
-      try {
-        const poll = await api('/login/poll', { method: 'POST', body: JSON.stringify({ state: start.state }) });
-        $('preLogin').textContent = poll.message || poll.status;
-        if (poll.status === 'success') {
-          clearInterval(loginPoll);
-          toast('登录成功：' + (poll.alias || ''), 'ok');
-          closeModal('modalLogin');
-          await refreshAll();
-        }
-        if (poll.status === 'error') clearInterval(loginPoll);
-      } catch (error) {
+const CAPTCHA_SDK = 'https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js';
+let captchaParam = '';
+let captchaReady = false;
+let oauthLink = '';
+
+function showPane(name) {
+  $('paneOAuth').style.display = name === 'oauth' ? '' : 'none';
+  $('panePhone').style.display = name === 'phone' ? '' : 'none';
+  $('tabOAuth').className = 'btn sm' + (name === 'oauth' ? ' primary' : '');
+  $('tabPhone').className = 'btn sm' + (name === 'phone' ? ' primary' : '');
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector('script[data-src="' + src + '"]')) { resolve(); return; }
+    const el = document.createElement('script');
+    el.src = src;
+    el.dataset.src = src;
+    el.onload = () => resolve();
+    el.onerror = () => reject(new Error('加载验证码脚本失败（需要能访问 o.alicdn.com）'));
+    document.head.appendChild(el);
+  });
+}
+
+async function setupCaptcha() {
+  if (captchaReady) return;
+  $('lblCaptcha').textContent = '读取验证码配置…';
+  const info = await api('/login/captcha');
+  if (!info.ok) { $('lblCaptcha').textContent = info.message || '验证码不可用'; return; }
+  const config = info.captcha || {};
+  if (!config.enabled) {
+    captchaReady = true;
+    $('lblCaptcha').textContent = '当前无需验证码';
+    $('btnOAuthStart').disabled = false;
+    return;
+  }
+  // The SDK reads region/prefix from this global before it is loaded.
+  window.AliyunCaptchaConfig = { region: config.region, prefix: config.prefix };
+  await loadScript(CAPTCHA_SDK);
+  if (typeof window.initAliyunCaptcha !== 'function') {
+    $('lblCaptcha').textContent = '验证码脚本未就绪';
+    return;
+  }
+  $('capSlot').innerHTML = '<button class="btn sm" id="btnCaptcha">点击完成安全验证</button>';
+  window.initAliyunCaptcha({
+    SceneId: config.scene_id,
+    prefix: config.prefix,
+    mode: 'popup',
+    element: '#capSlot',
+    button: '#btnCaptcha',
+    language: 'zh',
+    captchaVerifyCallback: (param) => {
+      captchaParam = typeof param === 'string' ? param : JSON.stringify(param || '');
+      window.__acCaptchaParam = captchaParam;
+      captchaReady = true;
+      $('lblCaptcha').textContent = '已验证';
+      $('btnOAuthStart').disabled = false;
+      return { captchaResult: true, bizResult: true };
+    },
+    onBizResultCallback: () => {},
+    getInstance: (instance) => { window.__acCaptcha = instance; },
+    slideStyle: { width: 360, height: 40 },
+  });
+  $('lblCaptcha').textContent = '等待验证';
+}
+
+function startPolling(state) {
+  clearInterval(loginPoll);
+  loginPoll = setInterval(async () => {
+    try {
+      const poll = await api('/login/poll', { method: 'POST', body: JSON.stringify({ state }) });
+      if (poll.status === 'success') {
         clearInterval(loginPoll);
-        toast(error.message, 'err');
+        toast('登录成功：' + (poll.alias || ''), 'ok');
+        closeModal('modalLogin');
+        await refreshAll();
+        return;
       }
-    }, 2500);
+      if (poll.status === 'error') { clearInterval(loginPoll); toast(poll.message, 'err'); }
+    } catch (error) {
+      clearInterval(loginPoll);
+      toast(error.message, 'err');
+    }
+  }, 2500);
+}
+
+$('btnAddAccount').addEventListener('click', async () => {
+  showPane('oauth');
+  $('preOAuth').textContent = '—';
+  $('prePhone').textContent = '—';
+  oauthLink = '';
+  $('btnOAuthOpen').disabled = true;
+  openModal('modalLogin');
+  try { await setupCaptcha(); } catch (error) {
+    $('lblCaptcha').textContent = error.message;
+  }
+});
+
+$('tabOAuth').addEventListener('click', () => showPane('oauth'));
+$('tabPhone').addEventListener('click', () => showPane('phone'));
+
+$('btnOAuthStart').addEventListener('click', async () => {
+  const button = $('btnOAuthStart');
+  button.disabled = true;
+  $('preOAuth').textContent = '正在向 AutoClaw 申请授权链接…';
+  try {
+    const result = await api('/login/start', {
+      method: 'POST',
+      body: JSON.stringify({ provider: $('selProvider').value, captcha_verify_param: captchaParam }),
+    });
+    if (!result.ok) {
+      $('preOAuth').textContent = result.message || '生成失败';
+      toast(result.message || '生成失败', 'err');
+      return;
+    }
+    oauthLink = result.url;
+    $('preOAuth').textContent = ['授权链接：' + result.url, '', '已在浏览器里打开；登录完成后本页会自动刷新账号池。'].join('\n');
+    $('btnOAuthOpen').disabled = false;
+    window.open(result.url, '_blank');
+    startPolling(result.state);
   } catch (error) {
+    $('preOAuth').textContent = error.message;
+    toast(error.message, 'err');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('btnOAuthOpen').addEventListener('click', () => { if (oauthLink) window.open(oauthLink, '_blank'); });
+
+$('btnSendCode').addEventListener('click', async () => {
+  const phone = $('txtPhone').value.trim();
+  if (!phone) { toast('先填手机号', 'err'); return; }
+  $('prePhone').textContent = '发送中…';
+  try {
+    const result = await api('/login/phone/send', { method: 'POST', body: JSON.stringify({ phone }) });
+    $('prePhone').textContent = result.message || (result.ok ? '验证码已发送' : '发送失败');
+    toast($('prePhone').textContent, result.ok ? 'ok' : 'err');
+  } catch (error) {
+    $('prePhone').textContent = error.message;
+    toast(error.message, 'err');
+  }
+});
+
+$('btnPhoneLogin').addEventListener('click', async () => {
+  const phone = $('txtPhone').value.trim();
+  const code = $('txtCode').value.trim();
+  if (!phone || !code) { toast('手机号和验证码都要填', 'err'); return; }
+  $('prePhone').textContent = '登录中…';
+  try {
+    const result = await api('/login/phone/verify', { method: 'POST', body: JSON.stringify({ phone, code }) });
+    $('prePhone').textContent = result.message || (result.ok ? '登录成功' : '登录失败');
+    toast($('prePhone').textContent, result.ok ? 'ok' : 'err');
+    if (result.ok) { closeModal('modalLogin'); await refreshAll(); }
+  } catch (error) {
+    $('prePhone').textContent = error.message;
     toast(error.message, 'err');
   }
 });

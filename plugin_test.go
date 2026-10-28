@@ -91,81 +91,6 @@ func TestParseCatalog(t *testing.T) {
 	}
 }
 
-func TestLoginPageAndPoll(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.DataDir = t.TempDir()
-	cfg.LoginPort = 18636
-	cfg.DebugDump = false
-	store, err := newStateStore(cfg.DataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plugin.mu.Lock()
-	plugin.cfg = cfg
-	plugin.state = store
-	plugin.mu.Unlock()
-	plugin.startLoginServer()
-	defer plugin.stopLoginServer()
-
-	raw, err := plugin.startLogin([]byte(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
-		t.Fatalf("start login envelope: %s", raw)
-	}
-	var started authLoginStartResponse
-	if err := json.Unmarshal(env.Result, &started); err != nil {
-		t.Fatal(err)
-	}
-	if started.URL == "" || started.State == "" {
-		t.Fatalf("start login response: %+v", started)
-	}
-
-	resp, err := http.Get(started.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 || !strings.Contains(string(page), "AutoClaw 授权登录") {
-		t.Fatalf("login page status=%d body=%q", resp.StatusCode, string(page[:min(len(page), 120)]))
-	}
-
-	pollRaw, err := plugin.pollLogin([]byte(`{"State":"` + started.State + `"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pollEnv envelope
-	if err := json.Unmarshal(pollRaw, &pollEnv); err != nil || !pollEnv.OK {
-		t.Fatalf("poll envelope: %s", pollRaw)
-	}
-	var polled authLoginPollResponse
-	if err := json.Unmarshal(pollEnv.Result, &polled); err != nil {
-		t.Fatal(err)
-	}
-	if polled.Status != "pending" {
-		t.Fatalf("poll status=%q", polled.Status)
-	}
-
-	bad, err := http.Post("http://127.0.0.1:18636/api/send-code", "application/json", strings.NewReader(`{"state":"missing","phone":"1"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad.Body.Close()
-	if bad.StatusCode != http.StatusBadRequest {
-		t.Fatalf("bad state status=%d", bad.StatusCode)
-	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func TestRefreshParsesToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -390,5 +315,129 @@ func TestSanitizedConfigMasksTokens(t *testing.T) {
 	}
 	if seen["rate_limit_rpm"] != "30" || seen["rate_limit_burst"] != "20" {
 		t.Fatalf("rate limit defaults missing: %q/%q", seen["rate_limit_rpm"], seen["rate_limit_burst"])
+	}
+}
+
+func TestLoginProviderAndCallbackURL(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.LoginCallbackPort = 18765
+	store, err := newStateStore(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.state = store
+	plugin.mu.Unlock()
+
+	if got := plugin.loginProvider("google"); got != loginProviderGoogle {
+		t.Fatalf("provider google: %q", got)
+	}
+	if got := plugin.loginProvider(""); got != loginProviderZai {
+		t.Fatalf("default provider: %q", got)
+	}
+
+	url, err := plugin.loginCallbackURL(loginProviderZai)
+	if err != nil {
+		t.Fatalf("callback url: %v", err)
+	}
+	if !strings.HasSuffix(url, "/auth/callback-zai") || !strings.HasPrefix(url, "http://localhost:") {
+		t.Fatalf("unexpected callback url: %q", url)
+	}
+	defer plugin.stopLoginCallback()
+
+	// Unknown callback path is not served.
+	rec := httptest.NewRecorder()
+	plugin.serveLoginCallback(rec, httptest.NewRequest(http.MethodGet, "/auth/callback-nope?code=1&state=2", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown path should 404, got %d", rec.Code)
+	}
+	// Missing code renders the failure page instead of exchanging anything.
+	rec = httptest.NewRecorder()
+	plugin.serveLoginCallback(rec, httptest.NewRequest(http.MethodGet, "/auth/callback-zai?state=abc", nil))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "授权没有完成") {
+		t.Fatalf("missing code: %d %s", rec.Code, rec.Body.String()[:80])
+	}
+}
+
+func TestOAuthURLAndExchange(t *testing.T) {
+	var sawCaptcha, sawExchange string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/userapi/overseasv1/zai-oauth-url":
+			var payload map[string]any
+			_ = json.Unmarshal(body, &payload)
+			sawCaptcha, _ = payload["ali_captcha_verify_param"].(string)
+			if sawCaptcha == "" {
+				_, _ = w.Write([]byte(`{"code":631002,"msg":"当前版本已停止服务，请前往官网下载最新版"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"oauth_url":"https://chat.z.ai/oauth/authorize?client_id=x&state=upstream-state"}}`))
+		case "/userapi/overseasv1/zai-oauth-login":
+			var payload map[string]string
+			_ = json.Unmarshal(body, &payload)
+			sawExchange = payload["code"] + "/" + payload["state"] + "/" + payload["navigate_uri"]
+			_, _ = w.Write([]byte(`{"code":0,"data":{"user_id":184702,"access_token":"` + testJWT() + `","refresh_token":"refresh-1"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.AuthBaseURL = server.URL
+	store, err := newStateStore(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin.mu.Lock()
+	plugin.cfg = cfg
+	plugin.state = store
+	plugin.mu.Unlock()
+
+	if _, err := plugin.requestOAuthURL(context.Background(), loginProviderZai, "http://localhost:18765/auth/callback-zai", ""); err == nil ||
+		!strings.Contains(err.Error(), "安全验证") {
+		t.Fatalf("missing captcha should map to a captcha hint, got %v", err)
+	}
+
+	account, err := plugin.exchangeOAuthCode(context.Background(), loginProviderZai, "code-1", "upstream-state", "http://localhost:18765/auth/callback-zai")
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if account.AccessToken == "" || account.UserID != "184702" {
+		t.Fatalf("unexpected account: %+v", account)
+	}
+	if sawExchange != "code-1/upstream-state/http://localhost:18765/auth/callback-zai" {
+		t.Fatalf("exchange payload: %q", sawExchange)
+	}
+
+	link, err := plugin.requestOAuthURL(context.Background(), loginProviderZai, "http://localhost:18765/auth/callback-zai", "captcha-proof")
+	if err != nil || !strings.HasPrefix(link, "https://chat.z.ai/oauth/authorize") {
+		t.Fatalf("authorize url: %q %v", link, err)
+	}
+	if sawCaptcha != "captcha-proof" {
+		t.Fatalf("captcha proof not forwarded: %q", sawCaptcha)
+	}
+}
+
+// testJWT builds a minimal token with the claims AutoClaw uses.
+func testJWT() string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	claims := base64.RawURLEncoding.EncodeToString([]byte(`{"user_id":184702,"device_id":"dev-1","exp":4102444800}`))
+	return header + "." + claims + ".sig"
+}
+
+func TestManagementPathExactMatchWins(t *testing.T) {
+	if got := normalizeManagementPath("/v0/management/autoclaw2api/login/status"); got != "/login/status" {
+		t.Fatalf("login/status should not fall through to /status, got %q", got)
+	}
+	if got := normalizeManagementPath("/v0/management/autoclaw2api/status"); got != "/status" {
+		t.Fatalf("status: %q", got)
+	}
+	if got := normalizeManagementPath("/v0/management/autoclaw2api/login/phone/send"); got != "/login/phone/send" {
+		t.Fatalf("phone send: %q", got)
 	}
 }

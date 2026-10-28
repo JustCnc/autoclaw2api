@@ -55,8 +55,12 @@ var managementRoutes = []managementRoute{
 	{"GET", "/logs"},
 	{"GET", "/config"},
 	{"POST", "/test"},
+	{"GET", "/login/status"},
+	{"GET", "/login/captcha"},
 	{"POST", "/login/start"},
 	{"POST", "/login/poll"},
+	{"POST", "/login/phone/send"},
+	{"POST", "/login/phone/verify"},
 }
 
 func normalizeManagementPath(path string) string {
@@ -78,8 +82,14 @@ func normalizeManagementPath(path string) string {
 			}
 		}
 	}
+	// Exact match first: "/login/status" must not be captured by "/status".
 	for _, route := range managementRoutes {
-		if p == route.path || strings.HasSuffix(p, route.path) {
+		if p == route.path {
+			return route.path
+		}
+	}
+	for _, route := range managementRoutes {
+		if strings.HasSuffix(p, route.path) {
 			return route.path
 		}
 	}
@@ -153,13 +163,42 @@ func (a *app) handleManagement(req managementRequest) managementResponse {
 		return jsonResponse(map[string]any{"config": a.sanitizedConfig()})
 	case method == "POST" && path == "/test":
 		return jsonResponse(a.testPayload(req))
-	case method == "POST" && path == "/login/start":
-		session := a.newLoginSession()
-		url := a.loginPageURL(session.State)
-		if url == "" {
-			return jsonResponse(map[string]any{"ok": false, "message": "授权登录页未启动，请检查 login_port 是否被占用"})
+	case method == "GET" && path == "/login/status":
+		cfg := a.currentConfig()
+		base := ""
+		a.loginCbMu.Lock()
+		if a.loginCbPort > 0 {
+			base = fmt.Sprintf("http://localhost:%d", a.loginCbPort)
 		}
-		return jsonResponse(map[string]any{"ok": true, "url": url, "state": session.State, "expires_at": session.Expires})
+		a.loginCbMu.Unlock()
+		return jsonResponse(map[string]any{
+			"callback_base": base,
+			"providers":     []string{loginProviderZai, loginProviderGoogle},
+			"timeout":       cfg.LoginTimeoutSeconds,
+		})
+	case method == "GET" && path == "/login/captcha":
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		captcha, err := a.loginCaptchaConfig(ctx)
+		if err != nil {
+			return jsonResponse(map[string]any{"ok": false, "message": err.Error()})
+		}
+		return jsonResponse(map[string]any{"ok": true, "captcha": captcha})
+	case method == "POST" && path == "/login/start":
+		var body struct {
+			Provider string `json:"provider"`
+			Captcha  string `json:"captcha_verify_param"`
+		}
+		_ = json.Unmarshal(req.Body, &body)
+		provider := a.loginProvider(body.Provider)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		session, url, err := a.startOAuthLogin(ctx, provider, body.Captcha)
+		if err != nil {
+			return jsonResponse(map[string]any{"ok": false, "message": err.Error()})
+		}
+		a.log.info("login", fmt.Sprintf("已生成 %s 授权链接：%s", provider, url))
+		return jsonResponse(map[string]any{"ok": true, "url": url, "state": session.State, "provider": provider, "expires_at": session.Expires})
 	case method == "POST" && path == "/login/poll":
 		var body struct {
 			State string `json:"state"`
@@ -176,9 +215,34 @@ func (a *app) handleManagement(req managementRequest) managementResponse {
 			return jsonResponse(map[string]any{"status": "error", "message": session.Err})
 		}
 		if time.Now().After(session.Expires) {
-			return jsonResponse(map[string]any{"status": "error", "message": "授权页已过期，请重新发起"})
+			return jsonResponse(map[string]any{"status": "error", "message": "授权链接已过期，请重新发起"})
 		}
-		return jsonResponse(map[string]any{"status": "pending", "message": "等待在授权页完成手机号验证"})
+		return jsonResponse(map[string]any{"status": "pending", "message": "等待在浏览器里完成授权"})
+	case method == "POST" && path == "/login/phone/send":
+		var body struct {
+			Phone string `json:"phone"`
+		}
+		_ = json.Unmarshal(req.Body, &body)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := a.sendLoginCode(ctx, body.Phone); err != nil {
+			return jsonResponse(map[string]any{"ok": false, "message": err.Error()})
+		}
+		return jsonResponse(map[string]any{"ok": true, "message": "验证码已发送"})
+	case method == "POST" && path == "/login/phone/verify":
+		var body struct {
+			Phone string `json:"phone"`
+			Code  string `json:"code"`
+			Alias string `json:"alias"`
+		}
+		_ = json.Unmarshal(req.Body, &body)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		account, err := a.completePhoneLogin(ctx, body.Phone, body.Code, body.Alias)
+		if err != nil {
+			return jsonResponse(map[string]any{"ok": false, "message": err.Error()})
+		}
+		return jsonResponse(map[string]any{"ok": true, "message": "已添加账号：" + account.Alias, "alias": account.Alias})
 	default:
 		return managementResponse{
 			StatusCode: http.StatusNotFound,
@@ -300,7 +364,7 @@ func (a *app) statusPayload() map[string]any {
 		"accounts":        map[string]any{"total": len(accounts), "usable": usable, "cooling": cooling, "disabled": disabled},
 		"catalog":         map[string]any{"count": len(snapshot.Models), "exposed": len(exposed), "default": snapshot.Default, "source": snapshot.Source, "fetched_at": snapshot.FetchedAt},
 		"limit":           map[string]any{"rpm": int(rpm), "burst": burst},
-		"config":          map[string]any{"data_dir": cfg.DataDir, "login_port": cfg.LoginPort, "login_bind": cfg.loginBind(), "model_prefix": modelPrefix},
+		"config":          map[string]any{"data_dir": cfg.DataDir, "login_callback_port": cfg.LoginCallbackPort, "model_prefix": modelPrefix},
 		"upstream":        map[string]any{"base_url": cfg.BaseURL, "auth_base_url": cfg.AuthBaseURL, "client_version": cfg.ClientVersion, "product": cfg.Product, "channel": cfg.Channel},
 		"started_at":      a.startedAt(),
 		"server_time":     now.UTC().Format(time.RFC3339),
@@ -655,8 +719,7 @@ func (a *app) sanitizedConfig() []configViewItem {
 		{Key: "max_tokens_default", Value: strconv.Itoa(cfg.MaxTokensDefault)},
 		{Key: "reasoning_effort", Value: cfg.ReasoningEffort},
 		{Key: "debug_dump", Value: strconv.FormatBool(cfg.DebugDump)},
-		{Key: "login_port", Value: strconv.Itoa(cfg.LoginPort)},
-		{Key: "login_bind", Value: cfg.loginBind()},
+		{Key: "login_callback_port", Value: strconv.Itoa(cfg.LoginCallbackPort)},
 		{Key: "login_timeout_seconds", Value: strconv.Itoa(cfg.LoginTimeoutSeconds)},
 	}
 }

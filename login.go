@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -12,21 +11,56 @@ import (
 	"time"
 )
 
+// AutoClaw's desktop sign-in is an OAuth dance, exactly like the upstream
+// client:
+//
+//	POST /userapi/overseasv1/{zai|google}-oauth-url   {navigate_uri, captcha proof}
+//	  -> data.oauth_url  (a real chat.z.ai / accounts.google.com authorize link)
+//	browser -> https://localhost:<port>/auth/callback-{zai|google}?code&state
+//	POST /userapi/overseasv1/{zai|google}-oauth-login {code, state, navigate_uri}
+//	  -> data.access_token / refresh_token
+//
+// The gateway also fronts the oauth-url endpoints with an Aliyun captcha: a
+// request without a valid proof is answered with code 631002 ("当前版本已停止
+// 服务"), and a wrong proof with 630014. The widget therefore has to run
+// somewhere a human can click it; the plugin console embeds it and forwards the
+// resulting captchaVerifyParam here.
+const (
+	loginProviderZai    = "zai"
+	loginProviderGoogle = "google"
+)
+
+// The desktop client binds the first free port from this list before asking for
+// the authorize URL, so the redirect_uri stays inside the OAuth client's
+// whitelist. The tail entries are plugin-only fallbacks.
+var defaultLoginCallbackPorts = []int{18432, 19654, 19723, 53699, 18764, 18765, 18766}
+
 type loginSession struct {
-	State   string
-	Created time.Time
-	Expires time.Time
-	Auth    *credential
-	Err     string
+	State       string
+	Provider    string
+	NavigateURI string
+	Created     time.Time
+	Expires     time.Time
+	Auth        *credential
+	Err         string
 }
 
-func (a *app) newLoginSession() *loginSession {
+func (a *app) loginProvider(raw string) string {
+	if strings.EqualFold(strings.TrimSpace(raw), loginProviderGoogle) {
+		return loginProviderGoogle
+	}
+	return loginProviderZai
+}
+
+func (a *app) newLoginSession(provider, navigateURI string) *loginSession {
 	cfg := a.currentConfig()
 	now := time.Now()
 	session := &loginSession{
-		State:   randomHex(32),
-		Created: now,
-		Expires: now.Add(time.Duration(cfg.LoginTimeoutSeconds) * time.Second),
+		State:       randomHex(32),
+		Provider:    provider,
+		NavigateURI: navigateURI,
+		Created:     now,
+		Expires:     now.Add(time.Duration(cfg.LoginTimeoutSeconds) * time.Second),
 	}
 	a.loginMu.Lock()
 	if a.logins == nil {
@@ -53,6 +87,31 @@ func (a *app) loginSession(state string) *loginSession {
 	return &cloned
 }
 
+// pendingLoginForProvider returns the newest unfinished session for a provider,
+// which is the one the loopback callback belongs to.
+func (a *app) pendingLoginForProvider(provider string) *loginSession {
+	a.loginMu.Lock()
+	defer a.loginMu.Unlock()
+	now := time.Now()
+	var best *loginSession
+	for _, session := range a.logins {
+		if session.Provider != provider || session.Auth != nil || session.Err != "" {
+			continue
+		}
+		if now.After(session.Expires) {
+			continue
+		}
+		if best == nil || session.Created.After(best.Created) {
+			best = session
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	cloned := *best
+	return &cloned
+}
+
 func (a *app) finishLogin(state string, account *credential, err error) {
 	a.loginMu.Lock()
 	defer a.loginMu.Unlock()
@@ -67,33 +126,367 @@ func (a *app) finishLogin(state string, account *credential, err error) {
 	session.Auth = account
 }
 
-func (a *app) loginPageURL(state string) string {
-	port := a.loginPort
-	if port <= 0 {
-		port = a.currentConfig().LoginPort
+// --- loopback callback -----------------------------------------------------
+
+// ensureLoginCallback binds the loopback receiver and returns its base URL, e.g.
+// http://localhost:19654. The listener answers only a code for a session this
+// plugin started.
+func (a *app) ensureLoginCallback() (string, error) {
+	a.loginCbMu.Lock()
+	if a.loginCb != nil {
+		base := fmt.Sprintf("http://localhost:%d", a.loginCbPort)
+		a.loginCbMu.Unlock()
+		return base, nil
 	}
-	if port <= 0 {
-		return ""
+	a.loginCbMu.Unlock()
+
+	cfg := a.currentConfig()
+	ports := defaultLoginCallbackPorts
+	if cfg.LoginCallbackPort > 0 {
+		ports = append([]int{cfg.LoginCallbackPort}, ports...)
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d/login?state=%s", port, state)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", a.serveLoginCallback)
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+
+	for _, port := range ports {
+		// Windows happily binds 0.0.0.0:<port> while another process owns
+		// 127.0.0.1:<port>, but then the browser's localhost callback would go to
+		// that other process (AutoClaw itself listens on 18432). Probe loopback
+		// first so we only pick a port that actually reaches us.
+		if conn, errDial := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond); errDial == nil {
+			_ = conn.Close()
+			continue
+		}
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			continue
+		}
+		a.loginCbMu.Lock()
+		if a.loginCb != nil {
+			a.loginCbMu.Unlock()
+			_ = listener.Close()
+			base := fmt.Sprintf("http://localhost:%d", a.loginCbPort)
+			return base, nil
+		}
+		a.loginCb = server
+		a.loginCbPort = port
+		a.loginCbMu.Unlock()
+		go func() {
+			if errServe := server.Serve(listener); errServe != nil && errServe != http.ErrServerClosed {
+				a.log.warn("login", "授权回调服务退出："+errServe.Error())
+			}
+		}()
+		a.log.info("login", fmt.Sprintf("授权回调已监听 :%d/auth/callback-{zai,google}", port))
+		return fmt.Sprintf("http://localhost:%d", port), nil
+	}
+	return "", fmt.Errorf("回调端口都被占用（%v）", ports)
 }
 
+func (a *app) stopLoginCallback() {
+	a.loginCbMu.Lock()
+	server := a.loginCb
+	port := a.loginCbPort
+	a.loginCb = nil
+	a.loginCbPort = 0
+	a.loginCbMu.Unlock()
+	if server != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = server.Shutdown(ctx)
+		cancel()
+		a.log.info("login", fmt.Sprintf("授权回调已停止 :%d", port))
+	}
+}
+
+func (a *app) loginCallbackURL(provider string) (string, error) {
+	base, err := a.ensureLoginCallback()
+	if err != nil {
+		return "", err
+	}
+	return base + "/auth/callback-" + provider, nil
+}
+
+func (a *app) serveLoginCallback(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	provider := ""
+	switch path {
+	case "/auth/callback-zai":
+		provider = loginProviderZai
+	case "/auth/callback-google":
+		provider = loginProviderGoogle
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	query := r.URL.Query()
+	code := strings.TrimSpace(query.Get("code"))
+	state := strings.TrimSpace(query.Get("state"))
+	if code == "" || state == "" {
+		writeCallbackPage(w, http.StatusBadRequest, false, "授权没有完成", "回调里缺少 code 或 state，请回到控制台重新发起授权。")
+		return
+	}
+	session := a.pendingLoginForProvider(provider)
+	if session == nil {
+		writeCallbackPage(w, http.StatusBadRequest, false, "登录会话已失效", "这个回调对应的授权已过期或被使用过，请回到控制台重新发起。")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	account, err := a.exchangeOAuthCode(ctx, provider, code, state, session.NavigateURI)
+	if err != nil {
+		a.finishLogin(session.State, nil, err)
+		writeCallbackPage(w, http.StatusBadRequest, false, "授权失败", err.Error())
+		return
+	}
+	registered := a.registerLoginAccount(account, "", "login")
+	a.finishLogin(session.State, registered, nil)
+	a.log.info("login", "授权回调完成："+registered.Alias)
+	writeCallbackPage(w, http.StatusOK, true, "登录成功", "账号「"+registered.Alias+"」已加入账号池，可以关闭这个页面了。")
+}
+
+func writeCallbackPage(w http.ResponseWriter, status int, ok bool, title, detail string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	accent := "#b91c1c"
+	icon := "M12 8v5m0 3.5h.01"
+	if ok {
+		accent = "#15803d"
+		icon = "M4 12.5l5 5L20 6.5"
+	}
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>%[1]s</title>
+<style>
+:root{color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:#f6f7f9;color:#111827;
+  font:400 14px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.card{width:min(420px,calc(100vw - 32px));padding:32px;background:#fff;border:1px solid #e3e6ec;
+  border-radius:12px;box-shadow:0 8px 24px rgba(15,23,42,.06);text-align:center}
+.badge{width:48px;height:48px;margin:0 auto 16px;border-radius:50%%;display:flex;
+  align-items:center;justify-content:center;background:%[2]s1a}
+.badge svg{width:24px;height:24px;stroke:%[2]s;fill:none;stroke-width:2.2;
+  stroke-linecap:round;stroke-linejoin:round}
+h1{margin:0 0 8px;font-size:17px;font-weight:600}
+p{margin:0;color:#5c6370;font-size:13px;word-break:break-word}
+</style></head><body>
+<div class="card">
+  <div class="badge"><svg viewBox="0 0 24 24"><path d="%[3]s"/></svg></div>
+  <h1>%[1]s</h1>
+  <p>%[4]s</p>
+</div></body></html>`, htmlEscape(title), accent, icon, htmlEscape(detail))
+}
+
+func htmlEscape(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
+	return replacer.Replace(value)
+}
+
+// --- upstream calls --------------------------------------------------------
+
+type captchaConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Region   string `json:"region"`
+	Prefix   string `json:"prefix"`
+	SceneID  string `json:"scene_id"`
+	Supplier string `json:"captcha_supplier"`
+}
+
+type oauthURLResponse struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data *struct {
+		OAuthURL string `json:"oauth_url"`
+	} `json:"data"`
+}
+
+type oauthLoginResponse struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data *struct {
+		UserID       json.Number `json:"user_id"`
+		UserName     string      `json:"user_name"`
+		UserPhone    string      `json:"user_phone"`
+		AccessToken  string      `json:"access_token"`
+		RefreshToken string      `json:"refresh_token"`
+		EnterpriseID string      `json:"enterprise_id"`
+	} `json:"data"`
+}
+
+func (a *app) postIdentity(ctx context.Context, path string, payload any) ([]byte, error) {
+	cfg := a.currentConfig()
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.AuthBaseURL+path, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header = a.loginHeaders(cfg)
+	resp, err := a.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("连接 AutoClaw 失败：%w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := readLimited(resp.Body, 1<<20)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("AutoClaw 返回 HTTP %d：%s", resp.StatusCode, truncateRunes(string(raw), 200))
+	}
+	return raw, nil
+}
+
+func (a *app) loginCaptchaConfig(ctx context.Context) (captchaConfig, error) {
+	cfg := a.currentConfig()
+	raw, err := a.postIdentity(ctx, "/userapi/overseasv1/oauth-captcha-config", map[string]any{
+		"source_id": "autoclaw",
+		"device_id": a.deviceID(cfg),
+	})
+	if err != nil {
+		return captchaConfig{}, err
+	}
+	var envelope struct {
+		Code int           `json:"code"`
+		Msg  string        `json:"msg"`
+		Data captchaConfig `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return captchaConfig{}, fmt.Errorf("验证码配置响应不是 JSON")
+	}
+	if envelope.Code != 0 {
+		return captchaConfig{}, fmt.Errorf("%s", firstNonEmpty(envelope.Msg, "读取验证码配置失败"))
+	}
+	return envelope.Data, nil
+}
+
+func (a *app) requestOAuthURL(ctx context.Context, provider, navigateURI, captcha string) (string, error) {
+	cfg := a.currentConfig()
+	payload := map[string]any{
+		"navigate_uri": navigateURI,
+		"source_id":    "autoclaw",
+		"device_id":    a.deviceID(cfg),
+	}
+	if strings.TrimSpace(captcha) != "" {
+		payload["ali_captcha_verify_param"] = captcha
+	}
+	raw, err := a.postIdentity(ctx, "/userapi/overseasv1/"+provider+"-oauth-url", payload)
+	if err != nil {
+		return "", err
+	}
+	var envelope oauthURLResponse
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return "", fmt.Errorf("授权链接响应不是 JSON")
+	}
+	switch envelope.Code {
+	case 0:
+	case 631002:
+		return "", fmt.Errorf("AutoClaw 拒绝了请求：需要先在页面里完成安全验证（缺 captchaVerifyParam 时网关会返回这个错误）")
+	case 630014:
+		return "", fmt.Errorf("安全验证没有通过，请重新点击验证码")
+	case 400001:
+		return "", fmt.Errorf("参数被拒绝：navigate_uri 不在 OAuth 回调白名单里")
+	default:
+		return "", fmt.Errorf("%s（code=%d）", firstNonEmpty(envelope.Msg, "获取授权链接失败"), envelope.Code)
+	}
+	if envelope.Data == nil || strings.TrimSpace(envelope.Data.OAuthURL) == "" {
+		return "", fmt.Errorf("授权链接响应里没有 oauth_url")
+	}
+	return strings.TrimSpace(envelope.Data.OAuthURL), nil
+}
+
+func (a *app) exchangeOAuthCode(ctx context.Context, provider, code, state, navigateURI string) (*credential, error) {
+	cfg := a.currentConfig()
+	raw, err := a.postIdentity(ctx, "/userapi/overseasv1/"+provider+"-oauth-login", map[string]any{
+		"code":         code,
+		"state":        state,
+		"navigate_uri": navigateURI,
+		"source_id":    "autoclaw",
+		"device_id":    a.deviceID(cfg),
+	})
+	if err != nil {
+		return nil, err
+	}
+	var envelope oauthLoginResponse
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, fmt.Errorf("授权响应不是 JSON")
+	}
+	if envelope.Code != 0 {
+		return nil, fmt.Errorf("%s（code=%d）", firstNonEmpty(envelope.Msg, "授权失败"), envelope.Code)
+	}
+	if envelope.Data == nil {
+		return nil, fmt.Errorf("授权响应没有数据")
+	}
+	access := normalizeToken(envelope.Data.AccessToken)
+	refresh := normalizeToken(envelope.Data.RefreshToken)
+	if access == "" {
+		return nil, fmt.Errorf("授权响应没有 access_token")
+	}
+	account := &credential{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		UserID:       envelope.Data.UserID.String(),
+		Source:       "login",
+		Enterprise:   strings.TrimSpace(envelope.Data.EnterpriseID) != "",
+		UpdatedAt:    time.Now().UnixMilli(),
+	}
+	account.normalize()
+	return account, nil
+}
+
+// startOAuthLogin creates a session, asks the gateway for the authorize link and
+// returns the link the user has to open.
+func (a *app) startOAuthLogin(ctx context.Context, provider, captcha string) (*loginSession, string, error) {
+	navigateURI, err := a.loginCallbackURL(provider)
+	if err != nil {
+		return nil, "", err
+	}
+	session := a.newLoginSession(provider, navigateURI)
+	authorizeURL, err := a.requestOAuthURL(ctx, provider, navigateURI, captcha)
+	if err != nil {
+		return nil, "", err
+	}
+	return session, authorizeURL, nil
+}
+
+// registerLoginAccount normalises an account produced by any login path and
+// publishes it to the pool.
+func (a *app) registerLoginAccount(account *credential, alias, source string) *credential {
+	cfg := a.currentConfig()
+	if account.DeviceID == "" {
+		account.DeviceID = a.deviceID(cfg)
+	}
+	account.Source = firstNonEmpty(source, "login")
+	if account.Priority == 0 {
+		account.Priority = cfg.CredentialPriority
+	}
+	if account.Alias == "" {
+		account.Alias = sanitizeAlias(firstNonEmpty(alias, account.UserID))
+	}
+	if account.Alias == "" {
+		account.Alias = "login-" + randomHex(3)
+	}
+	account.ID = accountIDForAlias(account.Alias)
+	account.UpdatedAt = time.Now().UnixMilli()
+	a.upsertAccount(account)
+	published := a.poolAccount(account.ID)
+	a.publishAccount(published, true)
+	return published
+}
+
+// --- CPA auth.login.* ------------------------------------------------------
+
+// startLogin answers CPA's auth.login.start. The gateway needs a captcha proof
+// that only a human can produce, so CPA's generic link flow cannot complete it;
+// the plugin console hosts the widget instead.
 func (a *app) startLogin(raw []byte) ([]byte, error) {
 	if _, err := decodeRequest[authLoginStartRequest](raw); err != nil {
 		return nil, err
 	}
-	session := a.newLoginSession()
-	url := a.loginPageURL(session.State)
-	if url == "" {
-		return errorEnvelope("login_unavailable", "授权登录页未启动：请检查 login_port 是否被占用"), nil
-	}
-	a.log.info("login", "已生成授权登录页："+url)
-	return okEnvelope(authLoginStartResponse{
-		Provider:  providerKey,
-		URL:       url,
-		State:     session.State,
-		ExpiresAt: session.Expires,
-	})
+	return errorEnvelope("login_requires_captcha",
+		"AutoClaw 授权需要先完成安全验证码：请到 CPA 的「AutoClaw2API」控制台 → 概览 → 新增账号，在页面里点击验证码生成授权链接"), nil
 }
 
 func (a *app) pollLogin(raw []byte) ([]byte, error) {
@@ -116,10 +509,12 @@ func (a *app) pollLogin(raw []byte) ([]byte, error) {
 		return okEnvelope(authLoginPollResponse{Status: "error", Message: session.Err})
 	}
 	if time.Now().After(session.Expires) {
-		return okEnvelope(authLoginPollResponse{Status: "error", Message: "授权页已过期，请重新发起"})
+		return okEnvelope(authLoginPollResponse{Status: "error", Message: "授权链接已过期，请重新发起"})
 	}
-	return okEnvelope(authLoginPollResponse{Status: "pending", Message: "等待在授权页完成手机号验证"})
+	return okEnvelope(authLoginPollResponse{Status: "pending", Message: "等待在浏览器里完成授权"})
 }
+
+// --- phone login (console only) --------------------------------------------
 
 func (a *app) sendLoginCode(ctx context.Context, phone string) error {
 	phone = strings.TrimSpace(phone)
@@ -127,25 +522,17 @@ func (a *app) sendLoginCode(ctx context.Context, phone string) error {
 		return fmt.Errorf("手机号不能为空")
 	}
 	cfg := a.currentConfig()
-	body, _ := json.Marshal(map[string]any{
+	raw, err := a.postIdentity(ctx, "/userapi/v1/agent-send-code", map[string]any{
 		"phone":     phone,
 		"source_id": "autoclaw",
 		"device_id": a.deviceID(cfg),
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.AuthBaseURL+"/userapi/v1/agent-send-code", strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	req.Header = a.loginHeaders(cfg)
-	resp, err := a.httpClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("发送验证码失败：%w", err)
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	var envelope struct {
-		Code json.Number `json:"code"`
-		Msg  string      `json:"msg"`
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
 		Data struct {
 			Result bool `json:"result"`
 		} `json:"data"`
@@ -153,7 +540,7 @@ func (a *app) sendLoginCode(ctx context.Context, phone string) error {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return fmt.Errorf("发送验证码响应不是 JSON")
 	}
-	if envelope.Code.String() != "0" || !envelope.Data.Result {
+	if envelope.Code != 0 || !envelope.Data.Result {
 		return fmt.Errorf("发送验证码失败：%s", firstNonEmpty(envelope.Msg, "未知错误"))
 	}
 	return nil
@@ -170,26 +557,18 @@ func (a *app) completePhoneLogin(ctx context.Context, phone, code, alias string)
 		return nil, fmt.Errorf("验证码必须是数字")
 	}
 	cfg := a.currentConfig()
-	body, _ := json.Marshal(map[string]any{
+	raw, err := a.postIdentity(ctx, "/userapi/v1/agent-login", map[string]any{
 		"phone":     phone,
 		"code":      codeNumber,
 		"source_id": "autoclaw",
 		"device_id": a.deviceID(cfg),
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.AuthBaseURL+"/userapi/v1/agent-login", strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
-	req.Header = a.loginHeaders(cfg)
-	resp, err := a.httpClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("登录失败：%w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var envelope struct {
-		Code json.Number `json:"code"`
-		Msg  string      `json:"msg"`
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
 		Data struct {
 			UserID            json.Number     `json:"user_id"`
 			UserName          string          `json:"user_name"`
@@ -204,9 +583,9 @@ func (a *app) completePhoneLogin(ctx context.Context, phone, code, alias string)
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, fmt.Errorf("登录响应不是 JSON")
 	}
-	if envelope.Code.String() != "0" {
+	if envelope.Code != 0 {
 		message := firstNonEmpty(envelope.Msg, "登录失败")
-		switch envelope.Code.String() {
+		switch strconv.Itoa(envelope.Code) {
 		case "630201":
 			message = "验证码已过期"
 		case "630202":
@@ -227,190 +606,12 @@ func (a *app) completePhoneLogin(ctx context.Context, phone, code, alias string)
 	account := &credential{
 		AccessToken:  access,
 		RefreshToken: refresh,
-		DeviceID:     a.deviceID(cfg),
 		UserID:       envelope.Data.UserID.String(),
 		Enterprise:   strings.TrimSpace(envelope.Data.EnterpriseID) != "",
-		Source:       "login",
-		Priority:     cfg.CredentialPriority,
 		UpdatedAt:    time.Now().UnixMilli(),
 	}
 	account.normalize()
-	alias = sanitizeAlias(firstNonEmpty(alias, account.UserID, strings.TrimSuffix(strings.TrimPrefix(phone, "+"), "")))
-	if alias == "" {
-		alias = "login-" + randomHex(3)
-	}
-	account.ID = accountIDForAlias(alias)
-	account.Alias = alias
-	a.upsertAccount(account)
-	a.publishAccount(a.poolAccount(account.ID), true)
-	a.log.info("login", "已通过手机号验证添加账号："+alias)
-	return account, nil
-}
-
-// startLoginServer serves the local authorization page. It is deliberately
-// loopback-only; the page itself is the only writable surface.
-func (a *app) startLoginServer() {
-	cfg := a.currentConfig()
-	port := cfg.LoginPort
-	if port <= 0 {
-		return
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/login", a.handleLoginPage)
-	mux.HandleFunc("/api/send-code", a.handleSendCode)
-	mux.HandleFunc("/api/login", a.handleLoginSubmit)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	})
-	server := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	bind := strings.TrimSpace(cfg.LoginBind)
-	if bind == "" {
-		bind = "127.0.0.1"
-	}
-	listener, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
-	if err != nil {
-		a.log.warn("login", fmt.Sprintf("授权登录页端口 %d 不可用：%s", port, err.Error()))
-		return
-	}
-	a.loginMu.Lock()
-	a.loginServer = server
-	a.loginPort = port
-	a.loginBindAddr = bind
-	a.loginMu.Unlock()
-	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			a.log.warn("login", "授权登录页已停止："+err.Error())
-		}
-	}()
-	a.log.info("login", fmt.Sprintf("授权登录页已监听 %s:%d", bind, port))
-}
-
-// ensureLoginServer keeps one listener alive across plugin reconfigure calls.
-// CPA registers and reconfigures the plugin several times per start; tearing the
-// page down each time drops in-flight logins and spams the log.
-func (a *app) ensureLoginServer() {
-	cfg := a.currentConfig()
-	port := cfg.LoginPort
-	if port <= 0 {
-		a.stopLoginServer()
-		return
-	}
-	bind := cfg.loginBind()
-	a.loginMu.Lock()
-	same := a.loginServer != nil && a.loginPort == port && a.loginBindAddr == bind
-	a.loginMu.Unlock()
-	if same {
-		return
-	}
-	a.stopLoginServer()
-	a.startLoginServer()
-}
-
-func (a *app) stopLoginServer() {
-	a.loginMu.Lock()
-	server := a.loginServer
-	a.loginServer = nil
-	a.loginPort = 0
-	a.loginBindAddr = ""
-	a.loginMu.Unlock()
-	if server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = server.Shutdown(ctx)
-		cancel()
-	}
-}
-
-func validLoginState(state string) bool {
-	if len(state) != 64 {
-		return false
-	}
-	for _, r := range state {
-		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
-func (a *app) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	state := strings.TrimSpace(r.URL.Query().Get("state"))
-	if !validLoginState(state) {
-		http.Error(w, "invalid state", http.StatusBadRequest)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = io.WriteString(w, strings.ReplaceAll(loginPageHTML, "__STATE__", state))
-}
-
-func (a *app) handleSendCode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		State string `json:"state"`
-		Phone string `json:"phone"`
-	}
-	if json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req) != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-	if a.loginSession(req.State) == nil {
-		writeJSONError(w, http.StatusBadRequest, "登录会话不存在或已过期")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
-	if err := a.sendLoginCode(ctx, req.Phone); err != nil {
-		writeJSONError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-func (a *app) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		State string `json:"state"`
-		Phone string `json:"phone"`
-		Code  string `json:"code"`
-		Alias string `json:"alias"`
-	}
-	if json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req) != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-	if a.loginSession(req.State) == nil {
-		writeJSONError(w, http.StatusBadRequest, "登录会话不存在或已过期")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	account, err := a.completePhoneLogin(ctx, req.Phone, req.Code, req.Alias)
-	if err != nil {
-		a.finishLogin(req.State, nil, err)
-		writeJSONError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	a.finishLogin(req.State, account, nil)
-	writeJSON(w, map[string]any{"ok": true, "alias": account.Alias})
-}
-
-func writeJSON(w http.ResponseWriter, value any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func writeJSONError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": message})
+	registered := a.registerLoginAccount(account, alias, "login")
+	a.log.info("login", "已通过手机号验证添加账号："+registered.Alias)
+	return registered, nil
 }

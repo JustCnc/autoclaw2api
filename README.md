@@ -12,7 +12,8 @@
 - `chat/completions`：流式 / 非流式、工具调用、`reasoning_content`、`usage`
 - `models`：从 `GET /autoclaw-proxy/proxy/autoclaw-model-config` 拉取模型目录并缓存
 - 多账号：配置里的主账号 + `accounts_dir/*.json` + CPA 里导入的 auth JSON
-- 授权登录：插件内置本机登录页，手机号 + 短信验证码登录 AutoClaw
+- 授权登录：控制台内嵌阿里云验证码，换取 AutoClaw 官方 OAuth 授权链接（Z.ai / Google），
+  loopback 回调自动收 token；手机号验证码登录也在控制台里
 - 插件页面：CPA 里的「AutoClaw2API」控制台（账号池 / 模型 / 日志 / 配置 / 测试对话）
 - token 自动续期：`/userapi/v1/refresh`，必要时回退 `/userapi/v1/agent-refresh`
 - 出站伪装：
@@ -82,8 +83,8 @@ plugins:
       # refresh_token: ""
       # device_id: ""
       accounts_dir: "/autoclaw-accounts"
-      login_port: 18634
-      login_bind: "127.0.0.1"   # Docker 里改成 0.0.0.0
+      # OAuth 授权回调端口：0 = 自动挑空闲端口（候选 18432/19654/19723/53699/1876x）
+      login_callback_port: 0
       # 上游单账号约 30 次/分钟、40 次突发；本地按账号做令牌桶平滑
       rate_limit_rpm: 30        # 0 = 关闭本地限速
       rate_limit_burst: 20
@@ -116,19 +117,42 @@ node tools/export-autoclaw-account.mjs --out .\accounts\default.json --alias def
 
 也可以直接把这份 JSON 放进 CPA 的 auth 目录，插件会通过 `auth.parse` 接收。
 
-### 方式二：CPA 里授权登录
+### 方式二：在插件控制台里授权登录（推荐）
 
-在 CPA 的插件账号页发起登录，插件会启动一个默认只监听 `127.0.0.1:<login_port>` 的
-页面，输入 AutoClaw 账号手机号和短信验证码即可。Docker 部署时把 `login_bind` 改成 `0.0.0.0`，并映射端口：
+AutoClaw 桌面端的登录是一套 OAuth 授权链接：
+
+```text
+POST https://autoglm-api.autoglm.ai/userapi/overseasv1/zai-oauth-url
+  { navigate_uri: http://localhost:<port>/auth/callback-zai, captcha proof }
+  -> https://chat.z.ai/api/oauth/authorize?client_id=…&redirect_uri=…&state=…
+浏览器登录后 -> http://localhost:<port>/auth/callback-zai?code=…&state=…
+POST /userapi/overseasv1/zai-oauth-login { code, state, navigate_uri } -> tokens
+```
+
+插件把这整套搬进了控制台：
+
+1. 「概览 → 新增账号 → 授权链接」，选 Z.ai 或 Google；
+2. 点一下阿里云人机验证（网关对 `*-oauth-url` 强制要求 `captchaVerifyParam`，
+   缺了会返回 `631002 当前版本已停止服务`，参数不对返回 `630014`）；
+3. 点「生成授权链接」，插件带着验证码参数向上游换到真正的
+   `https://chat.z.ai/api/oauth/authorize?...`，并在浏览器里打开；
+4. 你在浏览器里完成登录，Z.ai 会把 `code` 回调到插件的
+   `http://localhost:<login_callback_port>/auth/callback-zai`；
+5. 插件用 code 换 token，账号自动进池，控制台轮询到成功后刷新。
+
+Docker 部署时把回调端口映射出来（端口由 `login_callback_port` 指定，0 表示自动选择，
+日志里会打印实际端口）：
 
 ```yaml
 ports:
-  - "18634:18634"
+  - "19654:19654"
 ```
 
-手机号验证码页只覆盖 AutoClaw 的手机号登录。若账号是邮箱 / Google / Z.ai OAuth
-登录，或返回“需要在企业身份中选择”，请用方式一在已登录的 AutoClaw 客户端导出
-账号 JSON（登录页只处理个人手机号账号的直接登录）。
+手机号验证码也在同一个弹窗的第二个标签页里，直接调 `/userapi/v1/agent-send-code` 和
+`/userapi/v1/agent-login`，不需要额外的本地页面或端口。
+
+手机号验证码只覆盖 AutoClaw 的手机号登录；如果账号返回“需要在企业身份中选择”，
+请用方式一在已登录的 AutoClaw 客户端导出账号 JSON 再导入。
 
 ## 预编译产物
 
@@ -246,7 +270,7 @@ AutoClaw 账号，实际结果：
   或绕过计费。
 - `access_token` / `refresh_token` / `account-credentials.enc` 都是敏感凭据，不要提交
   到仓库或发给别人。
-- `login_port` 只绑定配置的地址（默认 `127.0.0.1`）；不要把它暴露到公网。
+- OAuth 回调只监听 `localhost` 语义的端口，并且只接受插件自己发起的 state；不要把回调端口映射到公网。
 - 插件和 AutoClaw 客户端共用同一个 `refresh_token`。插件自动续期后，AutoClaw
   客户端的本地登录态可能失效；重新打开客户端登录，或重新运行导出脚本即可。
   如果不想影响客户端，把 `refresh_margin_seconds` 设得很大，或在 token 过期前

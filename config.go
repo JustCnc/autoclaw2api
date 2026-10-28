@@ -55,11 +55,10 @@ type Config struct {
 	ReasoningEffort       string `yaml:"reasoning_effort"`
 	DebugDump             bool   `yaml:"debug_dump"`
 
-	// Authorization login. The plugin serves a small local page; Docker needs
-	// the same port published (127.0.0.1:<port>:<port>).
-	LoginPort           int    `yaml:"login_port"`
-	LoginBind           string `yaml:"login_bind"`
-	LoginTimeoutSeconds int    `yaml:"login_timeout_seconds"`
+	// Authorization login. The gateway hands the OAuth code back to a loopback
+	// URL, so the plugin binds one of the ports the desktop client uses.
+	LoginCallbackPort   int `yaml:"login_callback_port"`
+	LoginTimeoutSeconds int `yaml:"login_timeout_seconds"`
 }
 
 const (
@@ -77,9 +76,8 @@ const (
 	defaultUserAgent   = "node"
 	// The managed gateway rejects a request whose system prompt does not start
 	// with this exact desktop preamble (HTTP 406 with an empty body).
-	defaultPreamble  = "You are AutoClaw. Answer the user directly and concisely."
-	defaultModel     = "zai_glm-5.3-flash"
-	defaultLoginPort = 18634
+	defaultPreamble = "You are AutoClaw. Answer the user directly and concisely."
+	defaultModel    = "zai_glm-5.3-flash"
 )
 
 func defaultConfig() Config {
@@ -106,8 +104,7 @@ func defaultConfig() Config {
 		RateLimitBurst:        20,
 		RequestTimeoutSeconds: 600,
 		MaxTokensDefault:      131072,
-		LoginPort:             defaultLoginPort,
-		LoginBind:             "127.0.0.1",
+		LoginCallbackPort:     0,
 		LoginTimeoutSeconds:   600,
 	}
 }
@@ -226,12 +223,8 @@ func (c *Config) normalize() error {
 	default:
 		c.ReasoningEffort = ""
 	}
-	c.LoginBind = strings.TrimSpace(c.LoginBind)
-	if c.LoginBind == "" {
-		c.LoginBind = "127.0.0.1"
-	}
-	if c.LoginPort < 0 || c.LoginPort > 65535 {
-		c.LoginPort = 0
+	if c.LoginCallbackPort < 0 || c.LoginCallbackPort > 65535 {
+		c.LoginCallbackPort = 0
 	}
 	if c.LoginTimeoutSeconds <= 0 {
 		c.LoginTimeoutSeconds = 600
@@ -253,14 +246,6 @@ func (c Config) importInterval() time.Duration {
 
 func (c Config) refreshMargin() time.Duration {
 	return time.Duration(c.RefreshMargin) * time.Second
-}
-
-func (c Config) loginBind() string {
-	bind := strings.TrimSpace(c.LoginBind)
-	if bind == "" {
-		return "127.0.0.1"
-	}
-	return bind
 }
 
 func (c Config) rateLimit() (float64, int) {
@@ -371,8 +356,7 @@ func pluginConfigFields() []configField {
 		{Name: "max_tokens_default", Type: "integer", Default: 131072, Description: "客户端未给 max_tokens 时补的默认值，0 表示不补"},
 		{Name: "reasoning_effort", Type: "enum", Default: "", EnumValues: []string{"", "low", "medium", "high"}, Description: "客户端未指定思考强度时的默认值"},
 		{Name: "debug_dump", Type: "boolean", Default: false, Description: "日志记录出站头部与正文（排障用）"},
-		{Name: "login_port", Type: "integer", Default: defaultLoginPort, Description: "授权登录页端口（Docker 需映射同端口）"},
-		{Name: "login_bind", Type: "string", Default: "127.0.0.1", Description: "授权登录页监听地址；Docker 里填 0.0.0.0"},
+		{Name: "login_callback_port", Type: "integer", Default: 0, Description: "OAuth 回调端口（0 = 自动从 18432/19654/19723/53699 里挑空闲端口）"},
 		{Name: "login_timeout_seconds", Type: "integer", Default: 600, Description: "授权登录有效期"},
 	}
 }

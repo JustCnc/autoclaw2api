@@ -41,11 +41,11 @@ type app struct {
 	limitMu sync.Mutex
 	limits  map[string]*tokenBucket
 
-	loginMu       sync.Mutex
-	logins        map[string]*loginSession
-	loginServer   *http.Server
-	loginPort     int
-	loginBindAddr string
+	loginMu     sync.Mutex
+	logins      map[string]*loginSession
+	loginCb     *http.Server
+	loginCbMu   sync.Mutex
+	loginCbPort int
 }
 
 var plugin = &app{log: newLogRing(600)}
@@ -113,7 +113,7 @@ func (a *app) configure(raw []byte) error {
 		a.publishAccount(account, false)
 	}
 	a.ensureHostRecords()
-	a.ensureLoginServer()
+	a.ensureLoginCallback()
 	a.startBackground()
 	return nil
 }
@@ -141,7 +141,7 @@ func (a *app) startBackground() {
 }
 
 func (a *app) shutdown() {
-	a.stopLoginServer()
+	a.stopLoginCallback()
 	a.mu.Lock()
 	cancel := a.stop
 	done := a.done
